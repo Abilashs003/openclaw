@@ -1,0 +1,9 @@
+{
+  "id": "esp32-voice",
+  "channels": ["esp32voice"],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}
