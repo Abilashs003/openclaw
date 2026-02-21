@@ -56,7 +56,11 @@ function detectLocalIp() {
 const MAC_IP        = detectLocalIp();
 const VOICE_PORT    = process.env.VOICE_PORT    || "8765";     // standalone voice WS server port
 const GATEWAY_PORT  = process.env.GATEWAY_PORT  || "18789";    // OpenClaw Gateway port
-const GATEWAY_TOKEN = process.env.GATEWAY_TOKEN || "YOUR_GATEWAY_TOKEN_HERE";
+const GATEWAY_TOKEN = process.env.GATEWAY_TOKEN;
+if (!GATEWAY_TOKEN) {
+  console.error("[ota-server] ERROR: GATEWAY_TOKEN env var is required.");
+  process.exit(1);
+}
 const OTA_PORT      = parseInt(process.env.OTA_PORT || "8080", 10);
 
 // IST = UTC+5:30 = 330 minutes

@@ -1,6 +1,6 @@
 {
-  "name": "@openclaw/esp32-voice",
-  "version": "1.0.0",
+  "name": "@cheeko-voice/esp32-voice",
+  "version": "2026.2.21",
   "private": false,
   "description": "OpenClaw ESP32 Voice channel plugin — voice-to-text-to-voice device integration with pluggable STT/TTS providers",
   "type": "module",
@@ -10,7 +10,9 @@
     "index.ts",
     "src/",
     "openclaw.plugin.json",
-    "README.md"
+    "README.md",
+    "ota-server.js",
+    ".env.example"
   ],
   "keywords": [
     "openclaw",
@@ -30,7 +32,6 @@
     "directory": "extensions/esp32-voice"
   },
   "dependencies": {
-    "@discordjs/opus": "^0.10.0",
     "opusscript": "^0.0.8",
     "ws": "^8.18.0",
     "zod": "^4.3.6"
@@ -53,7 +54,7 @@
       "order": 90
     },
     "install": {
-      "npmSpec": "@openclaw/esp32-voice",
+      "npmSpec": "@cheeko-voice/esp32-voice",
       "localPath": "extensions/esp32-voice",
       "defaultChoice": "npm"
     }
