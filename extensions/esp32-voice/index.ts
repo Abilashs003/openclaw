@@ -22,20 +22,9 @@ const plugin = {
     // Register the ESP32 Voice channel
     api.registerChannel({ plugin: esp32VoicePlugin });
 
-    // ── Standalone Voice WebSocket Server ─────────────────────────
-    //
-    // The OpenClaw Gateway plugin API does NOT support WebSocket upgrade
-    // registration — registerHttpRoute() only handles regular HTTP requests.
-    // When an ESP32 tries to upgrade to WebSocket on the Gateway port (18789),
-    // the Gateway's own upgrade handler intercepts it and routes it to the
-    // Gateway's internal WS server instead of this plugin.
-    //
-    // Solution: spin up a dedicated HTTP server on a separate port (8765).
-    // The ESP32 firmware connects directly to this server. No core changes needed.
-    //
-    const { port } = startStandaloneVoiceServer(VOICE_PORT);
-
     // ── Gateway HTTP routes (non-WS utilities) ────────────────────
+    // These are registered now so they work once the gateway starts.
+    // The actual port is fixed at VOICE_PORT — routes reference it by closure.
 
     // Info route (tells callers this path needs a WS connection on the voice port)
     api.registerHttpRoute({
@@ -46,8 +35,8 @@ const plugin = {
           JSON.stringify({
             service: "esp32-voice",
             type: "websocket",
-            hint: `Connect your ESP32 via WebSocket to ws://<your-ip>:${port}/`,
-            voicePort: port,
+            hint: `Connect your ESP32 via WebSocket to ws://<your-ip>:${VOICE_PORT}/`,
+            voicePort: VOICE_PORT,
           }),
         );
       },
@@ -62,8 +51,8 @@ const plugin = {
           JSON.stringify({
             ok: true,
             service: "esp32-voice",
-            voicePort: port,
-            voiceWsUrl: `ws://<your-ip>:${port}/`,
+            voicePort: VOICE_PORT,
+            voiceWsUrl: `ws://<your-ip>:${VOICE_PORT}/`,
             sttConfigured: Boolean(
               process.env.DEEPGRAM_API_KEY ||
                 api.config?.channels?.esp32voice?.sttApiKey,
@@ -100,11 +89,32 @@ const plugin = {
       },
     });
 
-    console.log("[esp32voice] Plugin registered successfully");
-    console.log(`[esp32voice] Voice WebSocket (standalone): ws://0.0.0.0:${port}/`);
-    console.log(`[esp32voice] Point your ESP32 to:          ws://<your-mac-ip>:${port}/`);
-    console.log(`[esp32voice] Health check (Gateway port):  http://<gateway>/__openclaw__/esp32-voice/health`);
-    console.log(`[esp32voice] Generate OTP:                 http://<gateway>/__openclaw__/esp32-voice/otp`);
+    // ── Standalone Voice WebSocket Server (gateway-only service) ──
+    //
+    // The OpenClaw Gateway plugin API does NOT support WebSocket upgrade
+    // registration — registerHttpRoute() only handles regular HTTP requests.
+    // When an ESP32 tries to upgrade to WebSocket on the Gateway port (18789),
+    // the Gateway's own upgrade handler intercepts it and routes it to the
+    // Gateway's internal WS server instead of this plugin.
+    //
+    // Solution: spin up a dedicated HTTP server on a separate port (8765).
+    // The ESP32 firmware connects directly to this server. No core changes needed.
+    //
+    // Registered as a SERVICE so it only starts when the gateway starts,
+    // NOT during CLI commands like `channels add` (which would conflict
+    // with any already-running gateway on the same port).
+    //
+    api.registerService({
+      id: "esp32-voice-server",
+      start: async () => {
+        const { port } = startStandaloneVoiceServer(VOICE_PORT);
+        console.log("[esp32voice] Plugin registered successfully");
+        console.log(`[esp32voice] Voice WebSocket (standalone): ws://0.0.0.0:${port}/`);
+        console.log(`[esp32voice] Point your ESP32 to:          ws://<your-mac-ip>:${port}/`);
+        console.log(`[esp32voice] Health check (Gateway port):  http://<gateway>/__openclaw__/esp32-voice/health`);
+        console.log(`[esp32voice] Generate OTP:                 http://<gateway>/__openclaw__/esp32-voice/otp`);
+      },
+    });
   },
 };
 

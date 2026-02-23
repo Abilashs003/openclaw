@@ -17,6 +17,7 @@ import {
 } from "./accounts.js";
 import { monitorEsp32VoiceProvider } from "./monitor.js";
 import { getEsp32VoiceRuntime } from "./runtime.js";
+import { esp32VoiceOnboardingAdapter } from "./onboarding.js";
 
 const meta = {
   id: "esp32voice",
@@ -199,11 +200,10 @@ export const esp32VoicePlugin: ChannelPlugin<ResolvedEsp32VoiceAccount> = {
         accountId,
         name,
       }),
-    validateInput: ({ input }) => {
-      const token = input.botToken ?? input.token;
-      if (!token) {
-        return "ESP32 Voice requires a device token (--bot-token or ESP32_VOICE_DEVICE_TOKEN env).";
-      }
+    validateInput: () => {
+      // No token required — the WebSocket voice pipeline does not need a
+      // pre-configured device token. Devices authenticate via OTP pairing
+      // at runtime. The onboarding wizard handles full setup interactively.
       return null;
     },
     applyAccountConfig: ({ cfg, accountId, input }) => {
@@ -248,6 +248,7 @@ export const esp32VoicePlugin: ChannelPlugin<ResolvedEsp32VoiceAccount> = {
       };
     },
   },
+  onboarding: esp32VoiceOnboardingAdapter,
   gateway: {
     startAccount: async (ctx) => {
       const account = ctx.account;

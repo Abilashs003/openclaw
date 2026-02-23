@@ -907,6 +907,17 @@ export class VoiceSession {
     });
   }
 
+  // Returns true if a gateway response is a heartbeat ack (HEARTBEAT_OK),
+  // which should be ignored — the session is still waiting for the real reply.
+  private isHeartbeatResponse(text: string): boolean {
+    const lower = (text ?? "").trim().toLowerCase();
+    if (!lower) return false;
+    if (!lower.startsWith("heartbeat_ok")) return false;
+    // Allow "HEARTBEAT_OK" alone or followed by punctuation/spaces — not a word char
+    const suffix = lower.slice("heartbeat_ok".length);
+    return suffix.length === 0 || !/[a-z0-9_]/.test(suffix[0]);
+  }
+
   private async sendToOpenClaw(text: string): Promise<string> {
     if (!this.openclawWs || !this.openclawConnected) {
       throw new Error("Not connected to OpenClaw");
@@ -936,19 +947,33 @@ export class VoiceSession {
           const event = JSON.parse(data.toString());
           if (event.type === "event") {
             if (event.event === "agent" && event.payload?.stream === "assistant" && event.payload?.data?.text) {
-              responseContent = event.payload.data.text;
+              const candidate = event.payload.data.text as string;
+              // Skip heartbeat ack responses — they are internal gateway noise
+              if (!this.isHeartbeatResponse(candidate)) {
+                responseContent = candidate;
+              }
             } else if (event.event === "chat") {
               const payload = event.payload ?? {};
               const state = payload.state;
               const messageObj = payload.message;
+              let candidate = "";
               if (typeof messageObj?.content === "string") {
-                responseContent = messageObj.content;
+                candidate = messageObj.content;
               } else if (Array.isArray(messageObj?.content)) {
                 const textBlocks = (messageObj.content as Array<{ type: string; text?: string }>)
                   .filter(b => b.type === "text").map(b => b.text ?? "");
-                if (textBlocks.length > 0) responseContent = textBlocks.join("");
+                if (textBlocks.length > 0) candidate = textBlocks.join("");
+              }
+              // Skip heartbeat ack responses — keep waiting for real content
+              if (candidate && !this.isHeartbeatResponse(candidate)) {
+                responseContent = candidate;
               }
               if (state === "final" || state === "done" || state === "complete") {
+                // If the final response is a heartbeat ack, keep waiting
+                if (this.isHeartbeatResponse(responseContent)) {
+                  responseContent = "";
+                  return;
+                }
                 const hasPendingTools = Array.isArray(messageObj?.content) &&
                   (messageObj.content as Array<{ type: string }>).some(b => b.type === "tool_use");
                 if (!hasPendingTools) {

@@ -1,0 +1,595 @@
+/**
+ * ESP32 Voice — Setup Wizard (ChannelOnboardingAdapter)
+ *
+ * Runs automatically when the user does:
+ *   openclaw channels add --channel esp32voice
+ *
+ * Guides the user through:
+ *   Step 1 — Login to Cheeko dashboard (browser link + pairing token)
+ *   Step 2 — STT setup (Deepgram API key)
+ *   Step 3 — TTS setup (ElevenLabs API key + voice)
+ *   Step 4 — Add device (browser link to dashboard)
+ *
+ * Logout / re-setup:
+ *   openclaw channels add --channel esp32voice   (re-runs this wizard)
+ *   To fully reset: remove CHEEKO_PAIR from ~/.openclaw/.env
+ */
+
+import {
+  formatDocsLink,
+  type ChannelOnboardingAdapter,
+  type WizardPrompter,
+  DEFAULT_ACCOUNT_ID,
+} from "openclaw/plugin-sdk";
+import { homedir } from "node:os";
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
+import { spawn } from "node:child_process";
+import { detectLocalIp } from "./voice/voice-endpoint.js";
+
+// Dashboard UI URL — shown to user to open in browser (Vue frontend)
+const DASHBOARD_URL = process.env.CHEEKO_DASHBOARD_URL?.replace(/\/$/, "") || "http://64.227.170.31:8001";
+
+// Backend API URL — used for REST calls (manager-api-node, port 8002 + /toy context path)
+const BACKEND_API_URL = process.env.CHEEKO_API_URL?.replace(/\/$/, "") || "http://64.227.170.31:8002/toy";
+
+const VOICE_PORT = process.env.ESP32_VOICE_PORT || "8765";
+
+// ── Env helpers ───────────────────────────────────────────────────────────────
+
+function readEnvFile(): string[] {
+  const envPath = getEnvPath();
+  if (!existsSync(envPath)) return [];
+  return readFileSync(envPath, "utf8").split("\n");
+}
+
+function getEnvPath(): string {
+  const stateDir = process.env.OPENCLAW_STATE_DIR ?? join(homedir(), ".openclaw");
+  return join(stateDir, ".env");
+}
+
+function saveToEnv(pairs: Record<string, string>): void {
+  const stateDir = process.env.OPENCLAW_STATE_DIR ?? join(homedir(), ".openclaw");
+  if (!existsSync(stateDir)) mkdirSync(stateDir, { recursive: true });
+
+  const envPath = getEnvPath();
+  let lines = readEnvFile();
+
+  for (const [key, value] of Object.entries(pairs)) {
+    const idx = lines.findIndex((l) => l.trimStart().startsWith(`${key}=`));
+    const line = `${key}=${value}`;
+    if (idx !== -1) {
+      lines[idx] = line;
+    } else {
+      lines.push(line);
+    }
+  }
+
+  writeFileSync(envPath, lines.join("\n").trimEnd() + "\n", "utf8");
+}
+
+function clearFromEnv(keys: string[]): void {
+  const envPath = getEnvPath();
+  if (!existsSync(envPath)) return;
+  let lines = readFileSync(envPath, "utf8").split("\n");
+  lines = lines.filter((l) => !keys.some((k) => l.trimStart().startsWith(`${k}=`)));
+  writeFileSync(envPath, lines.join("\n").trimEnd() + "\n", "utf8");
+}
+
+function getEnvValue(key: string): string | undefined {
+  // Check process.env first (already loaded)
+  if (process.env[key]) return process.env[key];
+  // Then check .env file directly
+  const lines = readEnvFile();
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith(`${key}=`)) {
+      return trimmed.slice(key.length + 1).trim();
+    }
+  }
+  return undefined;
+}
+
+// ── Browser helper ────────────────────────────────────────────────────────────
+
+/**
+ * Open a URL in the user's default browser.
+ * macOS: open, Linux: xdg-open, Windows: start
+ */
+function openInBrowser(url: string): void {
+  const cmd =
+    process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open";
+  spawn(cmd, [url], { detached: true, stdio: "ignore" }).unref();
+}
+
+// ── Step 1 — Cheeko Dashboard Login + Pairing ─────────────────────────────────
+
+async function stepCheekoLogin(prompter: WizardPrompter): Promise<boolean> {
+  const existingPair = getEnvValue("CHEEKO_PAIR");
+
+  // Already paired — offer to re-pair or skip
+  if (existingPair) {
+    await prompter.note(
+      [
+        "You are already connected to the Cheeko dashboard.",
+        `Pairing token: ${existingPair.slice(0, 4)}****`,
+        "",
+        "To disconnect: clear CHEEKO_PAIR from ~/.openclaw/.env",
+        "To re-pair: run openclaw channels add --channel esp32voice",
+      ].join("\n"),
+      "Already connected",
+    );
+
+    const rePair = await prompter.confirm({
+      message: "Re-connect to Cheeko dashboard with a new token?",
+      initialValue: false,
+    });
+    if (!rePair) return true; // Skip, already paired
+  }
+
+  // Auto-open the dashboard in the user's browser
+  openInBrowser(`${DASHBOARD_URL}/login`);
+
+  // Show login instructions
+  await prompter.note(
+    [
+      "Step 1: The Cheeko dashboard has been opened in your browser.",
+      "",
+      `${formatDocsLink(`${DASHBOARD_URL}/login`, "Open Cheeko Dashboard →")}`,
+      "(opens automatically — click if it didn't open)",
+      "",
+      "After logging in, go to:",
+      "  Settings → Connect OpenClaw",
+      "",
+      "The dashboard will show a pairing token like:   XK9-2M4",
+      "Copy ONLY the short token — not the full command.",
+      "",
+      "Example: if you see  CHEEKO_PAIR=XK9-2M4  just paste  XK9-2M4",
+    ].join("\n"),
+    "Connect to Cheeko",
+  );
+
+  const rawInput = String(
+    await prompter.text({
+      message: "Paste your Cheeko pairing token (e.g. XK9-2M4)",
+      placeholder: "XK9-2M4",
+      validate: (v) => {
+        const raw = String(v ?? "").trim();
+        if (!raw) return "Required — get it from the Cheeko dashboard";
+        // Extract token even if user pasted the full command
+        const extracted = extractTokenFromInput(raw);
+        if (!extracted || extracted.length < 3) return "Token seems too short — paste just the short code (e.g. XK9-2M4)";
+        return undefined;
+      },
+    }),
+  ).trim();
+
+  // Auto-extract token if user pasted the full command string
+  // e.g. "CHEEKO_PAIR=8S5-CXU openclaw gateway" → "8S5-CXU"
+  const token = extractTokenFromInput(rawInput);
+  if (!token) {
+    await prompter.note("❌ Could not extract token from input. Please try again.", "Invalid token");
+    return false;
+  }
+
+  // Save the token locally immediately — works even when the dashboard API isn't live yet.
+  // The gateway will attempt to register with the dashboard on every startup.
+  const localIp = detectLocalIp();
+  const voiceUrl = `ws://${localIp}:${VOICE_PORT}/`;
+
+  saveToEnv({
+    CHEEKO_PAIR: token,
+    CHEEKO_DASHBOARD_URL: DASHBOARD_URL,
+  });
+
+  // Try to register with the dashboard (best-effort — non-blocking if API not ready yet)
+  await prompter.note(
+    [
+      "Attempting to register your OpenClaw with the Cheeko dashboard...",
+      "(This is optional — your token is already saved locally.)",
+    ].join("\n"),
+    "Connecting...",
+  );
+
+  try {
+    const response = await fetch(`${BACKEND_API_URL}/api/openclaw/pair`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token, url: voiceUrl, localIp }),
+      signal: AbortSignal.timeout(10_000),
+    });
+
+    // Try to parse JSON response, but handle HTML error pages gracefully
+    let data: { ok?: boolean; error?: string } = {};
+    const contentType = response.headers.get("content-type") ?? "";
+    if (contentType.includes("application/json")) {
+      data = (await response.json()) as { ok?: boolean; error?: string };
+    } else {
+      // Dashboard returned HTML (endpoint not implemented yet) — treat as pending
+      await prompter.note(
+        [
+          `⚠️  Dashboard API not ready yet (HTTP ${response.status}).`,
+          "Your token has been saved locally.",
+          "",
+          `Token saved: ${token.slice(0, 3)}****`,
+          `Voice URL:   ${voiceUrl}`,
+          "",
+          "The gateway will auto-register when the dashboard API is available.",
+          "Run: openclaw gateway",
+        ].join("\n"),
+        "Token saved locally",
+      );
+      return true;
+    }
+
+    if (!response.ok || !data.ok) {
+      // API returned an error — still saved locally, warn the user
+      await prompter.note(
+        [
+          `⚠️  Dashboard registration returned an error: ${data.error ?? `HTTP ${response.status}`}`,
+          "",
+          "Your token has been saved locally and will be used on next gateway start.",
+          `Token: ${token.slice(0, 3)}****`,
+        ].join("\n"),
+        "Saved locally (dashboard error)",
+      );
+      return true; // Continue setup — token is saved, gateway will retry
+    }
+
+    await prompter.note(
+      [
+        `✅ Connected! Your voice URL is registered:`,
+        `   ${voiceUrl}`,
+        "",
+        "Your Cheeko devices will now connect to this machine.",
+        "Token saved — future gateway starts auto-register.",
+      ].join("\n"),
+      "Dashboard connected",
+    );
+
+    return true;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    // Network error — token still saved locally
+    await prompter.note(
+      [
+        `⚠️  Could not reach Cheeko dashboard: ${msg}`,
+        "",
+        "Your token has been saved locally.",
+        `Token: ${token.slice(0, 3)}****`,
+        `Voice URL: ${voiceUrl}`,
+        "",
+        "The gateway will auto-register when the dashboard is reachable.",
+        "Run: openclaw gateway",
+      ].join("\n"),
+      "Token saved (dashboard unreachable)",
+    );
+    return true; // Continue setup — token is saved, gateway will retry
+  }
+}
+
+/**
+ * Extract the pairing token from user input.
+ * Handles cases where the user pasted the full command:
+ *   "CHEEKO_PAIR=XK9-2M4 openclaw gateway"  →  "XK9-2M4"
+ *   "XK9-2M4"                                →  "XK9-2M4"
+ *   "export CHEEKO_PAIR=XK9-2M4"             →  "XK9-2M4"
+ */
+function extractTokenFromInput(raw: string): string | null {
+  const trimmed = raw.trim();
+
+  // Try to extract from CHEEKO_PAIR=<token> pattern
+  const envMatch = trimmed.match(/CHEEKO_PAIR=([^\s]+)/);
+  if (envMatch) {
+    return envMatch[1].trim();
+  }
+
+  // If it looks like a plain token (no spaces, no equals sign), use it directly
+  if (!trimmed.includes(" ") && !trimmed.includes("=")) {
+    return trimmed;
+  }
+
+  // Try to find a token-like value (alphanumeric + hyphens, 3-20 chars)
+  const tokenMatch = trimmed.match(/\b([A-Z0-9]{2,8}-[A-Z0-9]{2,8})\b/i);
+  if (tokenMatch) {
+    return tokenMatch[1].trim();
+  }
+
+  // Last resort: take the first whitespace-separated word if it's short enough
+  const firstWord = trimmed.split(/\s+/)[0];
+  if (firstWord && firstWord.length >= 3 && firstWord.length <= 30) {
+    return firstWord;
+  }
+
+  return null;
+}
+
+// ── Step 2 — STT Setup (Deepgram) ─────────────────────────────────────────────
+
+async function stepSttSetup(prompter: WizardPrompter): Promise<void> {
+  const existing = getEnvValue("DEEPGRAM_API_KEY");
+
+  if (existing) {
+    const update = await prompter.confirm({
+      message: `Deepgram API key already set (${existing.slice(0, 8)}...). Update it?`,
+      initialValue: false,
+    });
+    if (!update) return;
+  } else {
+    await prompter.note(
+      [
+        "ESP32 Voice uses Deepgram for Speech-to-Text (STT).",
+        "You need a free Deepgram API key.",
+        "",
+        `${formatDocsLink("https://console.deepgram.com", "Get Deepgram API key →")}`,
+        "",
+        "Sign up → Create API key → Copy it below.",
+      ].join("\n"),
+      "STT Setup — Deepgram",
+    );
+  }
+
+  const key = String(
+    await prompter.text({
+      message: "Deepgram API key",
+      placeholder: "dg-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      validate: (v) => {
+        const k = String(v ?? "").trim();
+        if (!k) return "Required";
+        if (!k.startsWith("dg-") && k.length < 20) return "Doesn't look like a Deepgram key (should start with dg-)";
+        return undefined;
+      },
+    }),
+  ).trim();
+
+  const model = String(
+    await prompter.text({
+      message: "Deepgram model (optional, press Enter for default)",
+      placeholder: "nova-3",
+      initialValue: getEnvValue("DEEPGRAM_MODEL") ?? "",
+    }),
+  ).trim();
+
+  const toSave: Record<string, string> = { DEEPGRAM_API_KEY: key };
+  if (model) toSave.DEEPGRAM_MODEL = model;
+  saveToEnv(toSave);
+
+  await prompter.note("✅ Deepgram API key saved.", "STT ready");
+}
+
+// ── Step 3 — TTS Setup (ElevenLabs) ───────────────────────────────────────────
+
+async function stepTtsSetup(prompter: WizardPrompter): Promise<void> {
+  const existing = getEnvValue("ELEVENLABS_API_KEY");
+
+  if (existing) {
+    const update = await prompter.confirm({
+      message: `ElevenLabs API key already set (${existing.slice(0, 8)}...). Update it?`,
+      initialValue: false,
+    });
+    if (!update) return;
+  } else {
+    await prompter.note(
+      [
+        "ESP32 Voice uses ElevenLabs for Text-to-Speech (TTS).",
+        "You need an ElevenLabs API key.",
+        "",
+        `${formatDocsLink("https://elevenlabs.io/app/settings/api-keys", "Get ElevenLabs API key →")}`,
+        "",
+        "Sign up → Profile → API Keys → Create → Copy it below.",
+      ].join("\n"),
+      "TTS Setup — ElevenLabs",
+    );
+  }
+
+  const key = String(
+    await prompter.text({
+      message: "ElevenLabs API key",
+      placeholder: "sk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      validate: (v) => {
+        const k = String(v ?? "").trim();
+        if (!k) return "Required";
+        return undefined;
+      },
+    }),
+  ).trim();
+
+  const voiceId = String(
+    await prompter.text({
+      message: "ElevenLabs Voice ID (optional, press Enter for default)",
+      placeholder: "21m00Tcm4TlvDq8ikWAM",
+      initialValue: getEnvValue("ELEVENLABS_VOICE_ID") ?? "",
+    }),
+  ).trim();
+
+  const model = String(
+    await prompter.text({
+      message: "ElevenLabs model (optional, press Enter for default)",
+      placeholder: "eleven_flash_v2_5",
+      initialValue: getEnvValue("ELEVENLABS_MODEL_ID") ?? "",
+    }),
+  ).trim();
+
+  const toSave: Record<string, string> = { ELEVENLABS_API_KEY: key };
+  if (voiceId) toSave.ELEVENLABS_VOICE_ID = voiceId;
+  if (model) toSave.ELEVENLABS_MODEL_ID = model;
+  saveToEnv(toSave);
+
+  await prompter.note("✅ ElevenLabs API key saved.", "TTS ready");
+}
+
+// ── Step 4 — Add Device ────────────────────────────────────────────────────────
+
+async function stepAddDevice(prompter: WizardPrompter): Promise<void> {
+  // Auto-open the add-device page in the user's browser
+  openInBrowser(`${DASHBOARD_URL}/devices/add`);
+
+  await prompter.note(
+    [
+      "Now add your Cheeko device:",
+      "",
+      "1. Power on your Cheeko device",
+      "2. Wait for it to connect to WiFi",
+      "3. It will speak a 6-digit code",
+      "4. Enter that code on the dashboard:",
+      "",
+      `${formatDocsLink(`${DASHBOARD_URL}/devices/add`, "Add device on dashboard →")}`,
+      "(opens automatically — click if it didn't open)",
+      "",
+      "Once added, reboot the device — it will connect to your OpenClaw automatically.",
+    ].join("\n"),
+    "Add your Cheeko device",
+  );
+
+  await prompter.confirm({
+    message: "Device added? (press Enter to continue)",
+    initialValue: true,
+  });
+}
+
+// ── Logout helper ─────────────────────────────────────────────────────────────
+
+async function stepLogout(prompter: WizardPrompter): Promise<void> {
+  const existing = getEnvValue("CHEEKO_PAIR");
+  if (!existing) {
+    await prompter.note("No Cheeko connection found — nothing to disconnect.", "Not connected");
+    return;
+  }
+
+  const confirm = await prompter.confirm({
+    message: "Disconnect from Cheeko dashboard? (removes saved pairing token)",
+    initialValue: false,
+  });
+
+  if (!confirm) return;
+
+  clearFromEnv(["CHEEKO_PAIR", "CHEEKO_DASHBOARD_URL"]);
+  await prompter.note(
+    [
+      "✅ Disconnected from Cheeko dashboard.",
+      "",
+      "To reconnect: run  openclaw channels add --channel esp32voice",
+    ].join("\n"),
+    "Disconnected",
+  );
+}
+
+// ── Main onboarding adapter ───────────────────────────────────────────────────
+
+export const esp32VoiceOnboardingAdapter: ChannelOnboardingAdapter = {
+  channel: "esp32voice",
+
+  getStatus: async ({ cfg }) => {
+    const hasPair = Boolean(getEnvValue("CHEEKO_PAIR"));
+    const hasSTT = Boolean(getEnvValue("DEEPGRAM_API_KEY"));
+    const hasTTS = Boolean(getEnvValue("ELEVENLABS_API_KEY"));
+    const configured = hasPair && hasSTT && hasTTS;
+
+    const overallStatus = configured ? "configured" : "needs setup";
+    const lines: string[] = [];
+    lines.push(`ESP32 Voice: ${overallStatus}`);
+    lines.push(`  Cheeko dashboard: ${hasPair ? "✅ connected" : "❌ not connected"}`);
+    lines.push(`  STT (Deepgram):   ${hasSTT ? "✅ configured" : "❌ missing key"}`);
+    lines.push(`  TTS (ElevenLabs): ${hasTTS ? "✅ configured" : "❌ missing key"}`);
+
+    return {
+      channel: "esp32voice",
+      configured,
+      statusLines: lines,
+      selectionHint: configured ? "configured" : "needs setup",
+      quickstartScore: configured ? 1 : 0,
+    };
+  },
+
+  configure: async ({ cfg, prompter }) => {
+    // ── Intro ──────────────────────────────────────────────────────
+    await prompter.note(
+      [
+        "This wizard sets up your Cheeko ESP32 voice device.",
+        "",
+        "Steps:",
+        "  1. Connect to Cheeko dashboard",
+        "  2. Set up Speech-to-Text (Deepgram)",
+        "  3. Set up Text-to-Speech (ElevenLabs)",
+        "  4. Add your device",
+        "",
+        "Run: openclaw gateway   when done to start the voice server.",
+      ].join("\n"),
+      "🦞 Cheeko ESP32 Voice Setup",
+    );
+
+    // Check if user wants to logout instead
+    const existing = getEnvValue("CHEEKO_PAIR");
+    if (existing) {
+      const action = await prompter.select({
+        message: "What would you like to do?",
+        options: [
+          { value: "reconfigure", label: "Reconfigure / update settings" },
+          { value: "logout", label: "Disconnect from Cheeko dashboard" },
+        ],
+        initialValue: "reconfigure",
+      });
+
+      if (String(action) === "logout") {
+        await stepLogout(prompter);
+        return { cfg };
+      }
+    }
+
+    // ── Step 1: Dashboard login ────────────────────────────────────
+    const loginOk = await stepCheekoLogin(prompter);
+    if (!loginOk) {
+      await prompter.note(
+        [
+          "Setup incomplete — Cheeko dashboard not connected.",
+          "Re-run when ready: openclaw channels add --channel esp32voice",
+        ].join("\n"),
+        "Setup paused",
+      );
+      return { cfg };
+    }
+
+    // ── Step 2: STT ────────────────────────────────────────────────
+    await stepSttSetup(prompter);
+
+    // ── Step 3: TTS ────────────────────────────────────────────────
+    await stepTtsSetup(prompter);
+
+    // ── Step 4: Add device ─────────────────────────────────────────
+    await stepAddDevice(prompter);
+
+    // ── Done ───────────────────────────────────────────────────────
+    const localIp = detectLocalIp();
+    await prompter.note(
+      [
+        "✅ Setup complete!",
+        "",
+        "Your configuration:",
+        `  Voice server : ws://${localIp}:${VOICE_PORT}/`,
+        `  Dashboard    : ${DASHBOARD_URL}`,
+        `  STT          : Deepgram ${getEnvValue("DEEPGRAM_MODEL") ?? "(default model)"}`,
+        `  TTS          : ElevenLabs ${getEnvValue("ELEVENLABS_VOICE_ID") ?? "(default voice)"}`,
+        "",
+        "Start the voice server:",
+        "  openclaw gateway",
+        "",
+        "Re-run setup anytime:",
+        "  openclaw channels add --channel esp32voice",
+      ].join("\n"),
+      "🎉 All done!",
+    );
+
+    return { cfg, accountId: DEFAULT_ACCOUNT_ID };
+  },
+
+  disable: (cfg) => ({
+    ...cfg,
+    channels: {
+      ...(cfg as any).channels,
+      esp32voice: {
+        ...(cfg as any).channels?.esp32voice,
+        enabled: false,
+      },
+    },
+  }),
+};

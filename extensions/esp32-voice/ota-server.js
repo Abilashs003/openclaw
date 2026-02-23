@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Local OTA mock server for XiaoZhi ESP32 firmware.
+ * Local OTA mock server for Cheeko ESP32 firmware.
  *
  * The ESP32 firmware calls this on boot (Ota::CheckVersion) to get
  * the WebSocket server URL and auth token. We return config pointing
@@ -18,6 +18,29 @@
 
 import { createServer } from "node:http";
 import { networkInterfaces } from "node:os";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { homedir } from "node:os";
+
+// ── Auto-load ~/.openclaw/.env ─────────────────────────────────
+// Reads the OpenClaw env file and injects variables into process.env
+// so OPENCLAW_GATEWAY_TOKEN is available without any manual export.
+try {
+  const envPath = join(homedir(), ".openclaw", ".env");
+  const lines = readFileSync(envPath, "utf8").split("\n");
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const eqIdx = trimmed.indexOf("=");
+    if (eqIdx === -1) continue;
+    const key = trimmed.slice(0, eqIdx).trim();
+    const val = trimmed.slice(eqIdx + 1).trim();
+    // Don't overwrite vars already set in the shell
+    if (!(key in process.env)) process.env[key] = val;
+  }
+} catch {
+  // No ~/.openclaw/.env — that's fine, rely on shell env vars
+}
 
 // ── Auto-detect local LAN IP ───────────────────────────────────
 function detectLocalIp() {
@@ -56,11 +79,21 @@ function detectLocalIp() {
 const MAC_IP        = detectLocalIp();
 const VOICE_PORT    = process.env.VOICE_PORT    || "8765";     // standalone voice WS server port
 const GATEWAY_PORT  = process.env.GATEWAY_PORT  || "18789";    // OpenClaw Gateway port
-const GATEWAY_TOKEN = process.env.GATEWAY_TOKEN || "YOUR_GATEWAY_TOKEN_HERE";
+// Accept either GATEWAY_TOKEN or OPENCLAW_GATEWAY_TOKEN (the name openclaw uses in ~/.openclaw/.env)
+const GATEWAY_TOKEN = process.env.GATEWAY_TOKEN || process.env.OPENCLAW_GATEWAY_TOKEN;
+if (!GATEWAY_TOKEN) {
+  console.error("[ota-server] ERROR: Gateway token not found.");
+  console.error("[ota-server] Set OPENCLAW_GATEWAY_TOKEN in ~/.openclaw/.env or run:");
+  console.error("[ota-server]   GATEWAY_TOKEN=<your-token> node ota-server.js");
+  process.exit(1);
+}
 const OTA_PORT      = parseInt(process.env.OTA_PORT || "8080", 10);
 
-// IST = UTC+5:30 = 330 minutes
-const TIMEZONE_OFFSET = parseInt(process.env.TZ_OFFSET || "330", 10);
+// Auto-detect system timezone offset in minutes east of UTC.
+// getTimezoneOffset() returns minutes WEST of UTC (negative for east), so we negate it.
+const TIMEZONE_OFFSET = process.env.TZ_OFFSET
+  ? parseInt(process.env.TZ_OFFSET, 10)
+  : -new Date().getTimezoneOffset();
 
 // ── OTA Response ───────────────────────────────────────────────
 function buildOtaResponse() {
@@ -125,11 +158,11 @@ const server = createServer((req, res) => {
 server.listen(OTA_PORT, "0.0.0.0", () => {
   console.log(`\n🦞 ESP32 OTA Mock Server`);
   console.log(`   Auto-detected MAC IP : ${MAC_IP}`);
-  console.log(`   OTA Server           : http://${MAC_IP}:${OTA_PORT}/xiaozhi/ota/`);
+  console.log(`   OTA Server           : http://${MAC_IP}:${OTA_PORT}/cheeko/ota/`);
   console.log(`   Voice WebSocket      : ws://${MAC_IP}:${VOICE_PORT}/`);
   console.log(`   Gateway (AI agent)   : ws://${MAC_IP}:${GATEWAY_PORT}`);
   console.log(`   Gateway Token        : ${GATEWAY_TOKEN.slice(0, 8)}...`);
   console.log(`\n   Set on your ESP32:`);
-  console.log(`     OTA URL  → http://${MAC_IP}:${OTA_PORT}/xiaozhi/ota/`);
+  console.log(`     OTA URL  → http://${MAC_IP}:${OTA_PORT}/cheeko/ota/`);
   console.log(`\n   Waiting for ESP32 to connect...\n`);
 });
