@@ -90,6 +90,32 @@ function getEnvValue(key: string): string | undefined {
   return undefined;
 }
 
+// ── Gateway token helper ───────────────────────────────────────────────────────
+
+/**
+ * Read the OpenClaw gateway token from process.env or ~/.openclaw/openclaw.json.
+ * The plugin needs this to authenticate its internal WebSocket connection to the gateway.
+ */
+function readGatewayToken(): string | undefined {
+  // Already in env — daemon mode injects it, or user set it manually
+  if (process.env.OPENCLAW_GATEWAY_TOKEN) return process.env.OPENCLAW_GATEWAY_TOKEN;
+
+  // Fall back to reading from ~/.openclaw/openclaw.json → gateway.auth.token
+  try {
+    const stateDir = process.env.OPENCLAW_STATE_DIR ?? join(homedir(), ".openclaw");
+    const configPath = join(stateDir, "openclaw.json");
+    if (existsSync(configPath)) {
+      const raw = JSON.parse(readFileSync(configPath, "utf8")) as Record<string, unknown>;
+      const token = (raw?.gateway as Record<string, unknown>)?.auth;
+      const authToken = (token as Record<string, unknown>)?.token;
+      if (authToken && typeof authToken === "string") return authToken;
+    }
+  } catch {
+    // Ignore parse errors — config may not exist yet
+  }
+  return undefined;
+}
+
 // ── Browser helper ────────────────────────────────────────────────────────────
 
 /**
@@ -97,9 +123,15 @@ function getEnvValue(key: string): string | undefined {
  * macOS: open, Linux: xdg-open, Windows: start
  */
 function openInBrowser(url: string): void {
-  const cmd =
-    process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open";
-  spawn(cmd, [url], { detached: true, stdio: "ignore" }).unref();
+  try {
+    const cmd =
+      process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open";
+    const child = spawn(cmd, [url], { detached: true, stdio: "ignore" });
+    child.on("error", () => { /* best-effort — ignore if browser can't open */ });
+    child.unref();
+  } catch {
+    // Ignore — browser open is non-critical
+  }
 }
 
 // ── Step 1 — Cheeko Dashboard Login + Pairing ─────────────────────────────────
@@ -517,6 +549,28 @@ export const esp32VoiceOnboardingAdapter: ChannelOnboardingAdapter = {
       ].join("\n"),
       "🦞 Cheeko ESP32 Voice Setup",
     );
+
+    // ── Auto-save gateway token ────────────────────────────────────
+    // The plugin needs OPENCLAW_GATEWAY_TOKEN to authenticate with the gateway WebSocket.
+    // Read it from openclaw.json and persist it to .env so it's always available at runtime.
+    const gatewayToken = readGatewayToken();
+    if (gatewayToken) {
+      saveToEnv({ OPENCLAW_GATEWAY_TOKEN: gatewayToken });
+    } else {
+      await prompter.note(
+        [
+          "⚠️  Could not find your OpenClaw gateway token.",
+          "",
+          "The plugin needs this to connect to the gateway.",
+          "Run this first to set up OpenClaw:",
+          "  openclaw onboard",
+          "",
+          "Then re-run: openclaw channels add",
+        ].join("\n"),
+        "Gateway token missing",
+      );
+      return { cfg };
+    }
 
     // Check if user wants to logout instead
     const existing = getEnvValue("CHEEKO_PAIR");

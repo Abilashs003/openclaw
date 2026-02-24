@@ -10,7 +10,7 @@ Push to talk → speak → get a spoken response.
 ### Step 1 — Install the plugin
 
 ```bash
-openclaw plugins add @cheeko-ai/esp32-voice
+openclaw plugins install @cheeko-ai/esp32-voice
 ```
 
 ### Step 2 — Run the setup wizard
@@ -185,6 +185,25 @@ The plugin registers these endpoints on the OpenClaw Gateway port (18789):
 Tested with:
 - **Jiuchuan S3** (Cheeko ESP32-S3 board) — recommended
 - Any ESP32 board running [Cheeko ESP32 firmware](https://github.com/78/xiaozhi-esp32)
+
+---
+
+## Plugin Management
+
+```bash
+# Update to latest version
+openclaw plugins update @cheeko-ai/esp32-voice
+
+# Remove the plugin
+openclaw plugins uninstall @cheeko-ai/esp32-voice
+
+# List all installed plugins
+openclaw plugins list
+
+# Enable / disable without removing
+openclaw plugins enable @cheeko-ai/esp32-voice
+openclaw plugins disable @cheeko-ai/esp32-voice
+```
 
 ---
 
