@@ -9,6 +9,7 @@
   "files": [
     "index.ts",
     "src/",
+    "models/",
     "openclaw.plugin.json",
     "README.md",
     "TODO.md",
@@ -32,6 +33,7 @@
     "directory": "extensions/esp32-voice"
   },
   "dependencies": {
+    "onnxruntime-node": "^1.21.0",
     "opusscript": "^0.0.8",
     "ws": "^8.18.0",
     "zod": "^4.3.6"

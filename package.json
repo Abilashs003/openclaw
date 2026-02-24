@@ -234,6 +234,7 @@
       "authenticate-pam",
       "esbuild",
       "node-llama-cpp",
+      "onnxruntime-node",
       "protobufjs",
       "sharp"
     ]

@@ -18,6 +18,7 @@ import { ttsRegistry } from "../tts/tts-registry.js";
 import type { SttProvider } from "../stt/stt-provider.js";
 import type { TtsProvider } from "../tts/tts-provider.js";
 import { deviceOtpManager } from "../device/device-otp.js";
+import { SileroVad } from "../vad/silero-vad.js";
 
 // ── Opus Encoder (lazy-loaded) ────────────────────────────────
 // opusscript is a pure JS/WASM Opus encoder — no native binary needed.
@@ -46,6 +47,29 @@ async function getOpusEncoder(): Promise<any> {
   }
 }
 
+// ── Opus Decoder (lazy-loaded) ────────────────────────────────
+// Decodes incoming Opus frames from ESP32 to 16kHz PCM for Silero VAD.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let opusDecoderInstance: any = null;
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function getOpusDecoder(): Promise<any> {
+  if (opusDecoderInstance) return opusDecoderInstance;
+
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const OpusScript = (await import("opusscript")) as any;
+    const Ctor = OpusScript.default ?? OpusScript;
+    // Decode at 16kHz mono — matches ESP32 incoming audio sample rate
+    opusDecoderInstance = new Ctor(INPUT_SAMPLE_RATE, 1, Ctor.Application.VOIP);
+    console.log(`[opus] Decoder initialized via opusscript: ${INPUT_SAMPLE_RATE}Hz mono`);
+    return opusDecoderInstance;
+  } catch (err) {
+    console.error("[opus] Failed to load opusscript for decoding:", err);
+    throw new Error("Opus decoder not available. Install opusscript.");
+  }
+}
+
 // Same sentence boundary regex as the gateway (cheeko-chat.ts)
 const SENTENCE_BOUNDARY_RE = /(?<=[.!?])\s+/;
 
@@ -58,6 +82,11 @@ const OUTPUT_SAMPLE_RATE = 24000;
 const OUTPUT_FRAME_MS = 60;
 const OUTPUT_SAMPLES_PER_FRAME = (OUTPUT_SAMPLE_RATE * OUTPUT_FRAME_MS) / 1000; // 1440
 const OUTPUT_FRAME_BYTES = OUTPUT_SAMPLES_PER_FRAME * 2; // 2880 bytes (16-bit PCM)
+
+// Incoming audio parameters (ESP32 → server): 16kHz, 1ch, 60ms frames
+const INPUT_SAMPLE_RATE = 16000;
+const INPUT_FRAME_MS = 60;
+const INPUT_SAMPLES_PER_FRAME = (INPUT_SAMPLE_RATE * INPUT_FRAME_MS) / 1000; // 960
 
 export type VoiceSessionState =
   | "idle"
@@ -115,9 +144,45 @@ export class VoiceSession {
   // Processing task abort support
   private processingAbortController: AbortController | null = null;
 
+  // Silero VAD for local speech-end detection
+  private vad: SileroVad | null = null;
+  private vadReady = false;
+
   constructor(ws: WebSocket, sessionId: string) {
     this.ws = ws;
     this.sessionId = sessionId;
+
+    // Initialize Silero VAD in background (non-blocking)
+    this.initVad();
+  }
+
+  private initVad(): void {
+    const vad = new SileroVad({
+      speechThreshold: 0.5,
+      silenceDurationMs: 600,
+      minSpeechDurationMs: 250,
+    });
+
+    vad.init()
+      .then(() => {
+        this.vad = vad;
+        this.vadReady = true;
+
+        // Wire VAD speech-end to trigger processUtterance
+        this.vad!.onSpeechEnd = () => {
+          if (this.state === "listening") {
+            this.log("info", "Silero VAD speech_end → triggering processUtterance");
+            this.processUtterance().catch((err) =>
+              this.log("error", `processUtterance error from VAD: ${err}`)
+            );
+          }
+        };
+
+        this.log("info", "Silero VAD initialized");
+      })
+      .catch((err) => {
+        this.log("warn", `Silero VAD init failed (falling back to Deepgram VAD): ${err}`);
+      });
   }
 
   /**
@@ -154,6 +219,11 @@ export class VoiceSession {
     if (this.tts) {
       await this.tts.close();
       this.tts = null;
+    }
+    if (this.vad) {
+      await this.vad.destroy();
+      this.vad = null;
+      this.vadReady = false;
     }
     if (this.openclawWs) {
       try {
@@ -223,10 +293,29 @@ export class VoiceSession {
       return;
     }
 
+    // Send original Opus frames to Deepgram STT (unchanged — Deepgram decodes Opus natively)
     try {
       await this.stt.sendAudio(opusFrame);
     } catch (err) {
       this.log("error", `Audio send error: ${err}`);
+    }
+
+    // Decode Opus → PCM and feed to Silero VAD for local speech-end detection
+    if (this.vadReady && this.vad) {
+      try {
+        const decoder = await getOpusDecoder();
+        const pcmBuffer: Buffer = Buffer.from(decoder.decode(opusFrame, INPUT_SAMPLES_PER_FRAME));
+        // Convert Buffer (Int16) to Int16Array for VAD
+        const pcmInt16 = new Int16Array(
+          pcmBuffer.buffer,
+          pcmBuffer.byteOffset,
+          pcmBuffer.byteLength / 2
+        );
+        await this.vad.processAudio(pcmInt16);
+      } catch (err) {
+        // Non-fatal — VAD decode failure just means we fall back to Deepgram VAD
+        this.log("debug", `VAD audio decode error: ${err}`);
+      }
     }
   }
 
@@ -429,6 +518,11 @@ export class VoiceSession {
     }
 
     this.setState("listening");
+
+    // Reset VAD state for new utterance
+    if (this.vad) {
+      this.vad.resetState();
+    }
 
     // Create STT provider instance
     this.stt = sttRegistry.create(this.cfg.sttProvider, {
