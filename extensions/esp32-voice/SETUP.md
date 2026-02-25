@@ -15,7 +15,7 @@ cat >> ~/.openclaw/.env << 'EOF'
 GEMINI_API_KEY=YOUR_GEMINI_API_KEY_HERE
 
 # ESP32 Voice -- STT (Deepgram)
-DEEPGRAM_API_KEY=aae9ca67b7e8c3bba9f0cf031f571f05db14904d
+DEEPGRAM_API_KEY=<YOUR_DEEPGRAM_API_KEY>
 DEEPGRAM_MODEL=nova-2
 
 # ESP32 Voice -- TTS (ElevenLabs)

@@ -13,7 +13,9 @@
     "openclaw.plugin.json",
     "README.md",
     "TODO.md",
-    "NPM_PUBLISH_READINESS.md"
+    "NPM_PUBLISH_READINESS.md",
+    "ota-server.js",
+    ".env.example"
   ],
   "keywords": [
     "openclaw",
