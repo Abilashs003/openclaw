@@ -24,8 +24,8 @@ const WAV_HEADER_BYTES = 44;
 const GROQ_TTS_HOST = "api.groq.com";
 const GROQ_TTS_PATH = "/openai/v1/audio/speech";
 
-const DEFAULT_VOICE = "Fritz-PlayAI";
-const DEFAULT_MODEL = "playai-tts";
+const DEFAULT_VOICE = "troy";
+const DEFAULT_MODEL = "canopylabs/orpheus-v1-english";
 
 export class GroqPlayAiTtsProvider implements TtsProvider {
   readonly id = "groq-playai";
@@ -92,7 +92,6 @@ export class GroqPlayAiTtsProvider implements TtsProvider {
         input: text,
         voice: this.voice,
         response_format: "wav",
-        sample_rate: 24000,
       });
 
       const req = https.request(

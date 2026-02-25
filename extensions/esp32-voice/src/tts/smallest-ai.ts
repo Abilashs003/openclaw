@@ -19,10 +19,10 @@ import type {
 } from "./tts-provider.js";
 import { ttsRegistry } from "./tts-registry.js";
 
-const SMALLEST_WS_URL = "wss://waves-api.smallest.ai/api/v1/lightning/get_speech";
+const SMALLEST_WS_URL = "wss://waves-api.smallest.ai/api/v1/lightning-v2/get_speech/stream";
 
-const DEFAULT_VOICE_ID = "emily";
-const DEFAULT_MODEL_ID = "lightning";
+const DEFAULT_VOICE_ID = "ashley";
+const DEFAULT_MODEL_ID = "lightning-v2";
 
 export class SmallestAiTtsProvider implements TtsProvider {
   readonly id = "smallest-ai";
@@ -88,6 +88,9 @@ export class SmallestAiTtsProvider implements TtsProvider {
   }
 
   async synthesize(text: string): Promise<void> {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      throw new Error("[smallest-ai-tts] Not connected");
+    }
     // Buffer text — Smallest.ai sends everything in the flush request
     this.textBuffer.push(text);
   }
@@ -130,10 +133,11 @@ export class SmallestAiTtsProvider implements TtsProvider {
       const msg = JSON.parse(data.toString());
 
       // Audio chunk: raw PCM bytes (not base64 — Smallest.ai docs confirm raw PCM)
-      if (msg.audio && this.onAudio) {
-        const pcm = Buffer.isBuffer(msg.audio)
-          ? msg.audio
-          : Buffer.from(msg.audio as string, "base64");
+      const audioField = msg.data?.audio ?? msg.audio;
+      if (audioField && this.onAudio) {
+        const pcm = Buffer.isBuffer(audioField)
+          ? audioField
+          : Buffer.from(audioField as string, "base64");
         if (pcm.length > 0) {
           const cb = this.onAudio;
           this.audioChain = this.audioChain
@@ -142,7 +146,7 @@ export class SmallestAiTtsProvider implements TtsProvider {
         }
       }
 
-      if (msg.status === "complete" || msg.done) {
+      if (!this.isFinalReceived && (msg.status === "complete" || msg.done)) {
         console.log("[smallest-ai-tts] Stream complete");
         this.isFinalReceived = true;
         this.audioChain

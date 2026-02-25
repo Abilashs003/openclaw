@@ -2,9 +2,10 @@
  * Rime streaming Text-to-Speech provider.
  *
  * Uses Rime's WebSocket API for real-time TTS.
- * Sends text and receives binary PCM audio (24kHz, 16-bit mono).
+ * Text tokens are sent as plain-text frames; audio arrives as binary PCM frames.
+ * End-of-stream is signalled by sending the "<EOS>" token.
  *
- * WebSocket URL: wss://users.rime.ai/v1/rime-tts
+ * WebSocket URL: wss://users-ws.rime.ai/ws
  * Docs: https://rime.ai/docs
  */
 
@@ -18,10 +19,10 @@ import type {
 } from "./tts-provider.js";
 import { ttsRegistry } from "./tts-registry.js";
 
-const RIME_WS_URL = "wss://users.rime.ai/v1/rime-tts";
+const RIME_WS_URL = "wss://users-ws.rime.ai/ws";
 
-const DEFAULT_VOICE_ID = "arcas";
-const DEFAULT_MODEL_ID = "mist";
+const DEFAULT_VOICE_ID = "cove";
+const DEFAULT_MODEL_ID = "mistv2";
 
 export class RimeTtsProvider implements TtsProvider {
   readonly id = "rime";
@@ -38,7 +39,6 @@ export class RimeTtsProvider implements TtsProvider {
   private ws: WebSocket | null = null;
   private doneResolve: (() => void) | null = null;
   private donePromise: Promise<void> | null = null;
-  // Serialises onAudio calls so pacing sleeps in voice-session are respected
   private audioChain: Promise<void> = Promise.resolve();
   private isFinalReceived = false;
 
@@ -49,7 +49,7 @@ export class RimeTtsProvider implements TtsProvider {
   }
 
   async connect(): Promise<void> {
-    const url = `${RIME_WS_URL}?voice=${this.voiceId}&modelId=${this.modelId}&audioFormat=pcm&samplingRate=24000&reduceLatency=true`;
+    const url = `${RIME_WS_URL}?speaker=${this.voiceId}&modelId=${this.modelId}&audioFormat=pcm`;
 
     return new Promise<void>((resolve, reject) => {
       this.ws = new WebSocket(url, {
@@ -67,8 +67,8 @@ export class RimeTtsProvider implements TtsProvider {
         resolve();
       });
 
-      this.ws.on("message", (data: Buffer) => {
-        this.handleMessage(data);
+      this.ws.on("message", (data: Buffer, isBinary: boolean) => {
+        this.handleMessage(data, isBinary);
       });
 
       this.ws.on("error", (err) => {
@@ -78,11 +78,11 @@ export class RimeTtsProvider implements TtsProvider {
 
       this.ws.on("close", () => {
         console.log("[rime-tts] Connection closed");
-        if (!this.isFinalReceived) {
-          this.audioChain
-            .then(() => this.fireDone())
-            .catch(() => this.fireDone());
-        }
+        // Server closes after <EOS> — treat close as done signal
+        this.isFinalReceived = true;
+        this.audioChain
+          .then(() => this.fireDone())
+          .catch(() => this.fireDone());
       });
     });
   }
@@ -91,12 +91,14 @@ export class RimeTtsProvider implements TtsProvider {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       throw new Error("[rime-tts] Not connected");
     }
-    this.ws.send(JSON.stringify({ text }));
+    // Send plain text token (not JSON)
+    this.ws.send(text);
   }
 
   async flush(): Promise<void> {
     if (this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify({ operation: "eos" }));
+      // End-of-stream token — server will finish synthesis and close the connection
+      this.ws.send("<EOS>");
     }
     if (this.donePromise) {
       const timeout = new Promise<void>((resolve) => {
@@ -116,30 +118,13 @@ export class RimeTtsProvider implements TtsProvider {
     }
   }
 
-  private handleMessage(data: Buffer): void {
-    // Rime sends binary PCM frames directly — no JSON wrapper, no base64
-    if (data instanceof Buffer && data.length > 0) {
-      // Check if it's JSON (could be a status/done message)
-      try {
-        const msg = JSON.parse(data.toString());
-        if (msg.done || msg.eos) {
-          console.log("[rime-tts] Stream complete");
-          this.isFinalReceived = true;
-          this.audioChain
-            .then(() => this.fireDone())
-            .catch(() => this.fireDone());
-        }
-        return;
-      } catch {
-        // Not JSON — it's raw PCM audio bytes
-      }
-
-      if (this.onAudio) {
-        const cb = this.onAudio;
-        this.audioChain = this.audioChain
-          .then(() => cb(data))
-          .catch((err) => console.error("[rime-tts] Audio callback error:", err));
-      }
+  private handleMessage(data: Buffer, isBinary: boolean): void {
+    // Rime sends binary PCM audio frames
+    if (isBinary && data.length > 0 && this.onAudio) {
+      const cb = this.onAudio;
+      this.audioChain = this.audioChain
+        .then(() => cb(data))
+        .catch((err) => console.error("[rime-tts] Audio callback error:", err));
     }
   }
 
@@ -160,7 +145,7 @@ export class RimeTtsProvider implements TtsProvider {
 export const rimeMeta: TtsProviderMeta = {
   id: "rime",
   name: "Rime",
-  description: "Streaming TTS with native PCM output and reduce_latency mode. Low latency for voice assistants.",
+  description: "Real-time streaming TTS via WebSocket. Text tokens stream in, raw PCM audio streams back. Very low latency.",
   streaming: true,
   envVar: "RIME_API_KEY",
   defaultVoiceId: DEFAULT_VOICE_ID,

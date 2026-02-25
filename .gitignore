@@ -103,3 +103,4 @@ clerk-nextjs-guide
 
 # Git worktrees
 .worktrees/
+.cache/npm/

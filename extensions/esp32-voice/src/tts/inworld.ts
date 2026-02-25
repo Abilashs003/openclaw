@@ -1,13 +1,19 @@
 /**
  * Inworld streaming Text-to-Speech provider.
  *
- * Uses Inworld's WebSocket API for real-time TTS.
- * Sends text and receives binary LINEAR16 PCM audio (24kHz, 16-bit mono).
- * Latency: <120ms P90 with tts-1.5-mini model.
+ * Uses Inworld's bidirectional WebSocket API (voice:streamBidirectional).
+ * Sends text and receives base64 LINEAR16 PCM audio (24kHz, 16-bit mono).
+ *
+ * Protocol:
+ *   1. Connect → send create context
+ *   2. synthesize() → send_text
+ *   3. flush() → flush_context, wait for flushCompleted
+ *   4. close() → close_context + ws.close()
  *
  * Docs: https://inworld.ai/tts-api
  */
 
+import { randomUUID } from "crypto";
 import WebSocket from "ws";
 import type {
   TtsProvider,
@@ -18,10 +24,10 @@ import type {
 } from "./tts-provider.js";
 import { ttsRegistry } from "./tts-registry.js";
 
-const INWORLD_WS_URL = "wss://api.inworld.ai/tts/v1/stream";
+const INWORLD_WS_URL = "wss://api.inworld.ai/tts/v1/voice:streamBidirectional";
 
-const DEFAULT_VOICE = "inworld.neutral";
-const DEFAULT_MODEL = "tts-1.5-mini";
+const DEFAULT_VOICE = "Ashley";
+const DEFAULT_MODEL = "inworld-tts-1.5-mini";
 
 export class InworldTtsProvider implements TtsProvider {
   readonly id = "inworld";
@@ -36,8 +42,9 @@ export class InworldTtsProvider implements TtsProvider {
   private voice: string;
   private model: string;
   private ws: WebSocket | null = null;
-  private doneResolve: (() => void) | null = null;
-  private donePromise: Promise<void> | null = null;
+  private contextId: string | null = null;
+  private flushResolve: (() => void) | null = null;
+  private flushPromise: Promise<void> | null = null;
   private audioChain: Promise<void> = Promise.resolve();
   private isFinalReceived = false;
 
@@ -48,24 +55,32 @@ export class InworldTtsProvider implements TtsProvider {
   }
 
   async connect(): Promise<void> {
+    this.contextId = randomUUID();
+    this.audioChain = Promise.resolve();
+    this.isFinalReceived = false;
+
     return new Promise<void>((resolve, reject) => {
       this.ws = new WebSocket(INWORLD_WS_URL, {
         headers: {
-          Authorization: `Bearer ${this.apiKey}`,
-          "X-TTS-Voice": this.voice,
-          "X-TTS-Model": this.model,
-          "X-TTS-SampleRate": "24000",
-          "X-TTS-Encoding": "LINEAR16",
+          Authorization: `Basic ${this.apiKey}`,
         },
       });
 
-      this.donePromise = new Promise<void>((res) => {
-        this.doneResolve = res;
-      });
-      this.audioChain = Promise.resolve();
-      this.isFinalReceived = false;
-
       this.ws.on("open", () => {
+        // Send create context with voice/model config
+        const createMsg = {
+          create: {
+            voiceId: this.voice,
+            modelId: this.model,
+            audioConfig: {
+              audioEncoding: "LINEAR16",
+              sampleRateHertz: 24000,
+            },
+          },
+          contextId: this.contextId,
+        };
+        this.ws!.send(JSON.stringify(createMsg));
+        // Resolve immediately after sending create — contextCreated will arrive async
         console.log("[inworld-tts] Connected");
         resolve();
       });
@@ -94,52 +109,97 @@ export class InworldTtsProvider implements TtsProvider {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       throw new Error("[inworld-tts] Not connected");
     }
-    this.ws.send(JSON.stringify({ text }));
+    this.ws.send(JSON.stringify({
+      send_text: { text },
+      contextId: this.contextId,
+    }));
   }
 
   async flush(): Promise<void> {
     if (this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify({ end: true }));
+      this.flushPromise = new Promise<void>((res) => {
+        this.flushResolve = res;
+      });
+      this.ws.send(JSON.stringify({
+        flush_context: {},
+        contextId: this.contextId,
+      }));
+    } else {
+      this.flushPromise = Promise.resolve();
     }
-    if (this.donePromise) {
+
+    if (this.flushPromise) {
       const timeout = new Promise<void>((resolve) => {
         setTimeout(() => {
           console.warn("[inworld-tts] Timeout waiting for audio completion");
           resolve();
         }, 30000);
       });
-      await Promise.race([this.donePromise, timeout]);
+      await Promise.race([this.flushPromise, timeout]);
     }
   }
 
   async close(): Promise<void> {
-    if (this.ws) {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      try {
+        this.ws.send(JSON.stringify({
+          close_context: {},
+          contextId: this.contextId,
+        }));
+      } catch { /* ignore */ }
       try { this.ws.close(); } catch { /* ignore */ }
       this.ws = null;
     }
   }
 
   private handleMessage(data: Buffer): void {
-    // Try JSON first (status / done messages)
     try {
       const msg = JSON.parse(data.toString());
-      if (msg.done || msg.end) {
+
+      // API error response — fail fast instead of waiting for timeout
+      if (msg.error) {
+        console.error("[inworld-tts] API error:", msg.error.message ?? JSON.stringify(msg.error));
+        if (this.flushResolve) { this.flushResolve(); this.flushResolve = null; }
+        this.fireDone();
+        return;
+      }
+
+      const result = msg.result;
+      if (!result) return;
+
+      // Audio chunk
+      if (result.audioChunk?.audioContent && this.onAudio) {
+        const pcm = Buffer.from(result.audioChunk.audioContent as string, "base64");
+        if (pcm.length > 0) {
+          const cb = this.onAudio;
+          this.audioChain = this.audioChain
+            .then(() => cb(pcm))
+            .catch((err) => console.error("[inworld-tts] Audio callback error:", err));
+        }
+      }
+
+      // Flush completed signal
+      if (result.flushCompleted !== undefined) {
         console.log("[inworld-tts] Stream complete");
         this.isFinalReceived = true;
         this.audioChain
-          .then(() => this.fireDone())
-          .catch(() => this.fireDone());
+          .then(() => {
+            this.fireDone();
+            if (this.flushResolve) {
+              this.flushResolve();
+              this.flushResolve = null;
+            }
+          })
+          .catch(() => {
+            this.fireDone();
+            if (this.flushResolve) {
+              this.flushResolve();
+              this.flushResolve = null;
+            }
+          });
       }
-      return;
     } catch {
-      // Binary PCM (LINEAR16) audio data
-    }
-
-    if (data.length > 0 && this.onAudio) {
-      const cb = this.onAudio;
-      this.audioChain = this.audioChain
-        .then(() => cb(data))
-        .catch((err) => console.error("[inworld-tts] Audio callback error:", err));
+      // Ignore non-JSON messages
     }
   }
 
@@ -150,17 +210,13 @@ export class InworldTtsProvider implements TtsProvider {
         result.catch((err) => console.error("[inworld-tts] Done callback error:", err));
       }
     }
-    if (this.doneResolve) {
-      this.doneResolve();
-      this.doneResolve = null;
-    }
   }
 }
 
 export const inworldMeta: TtsProviderMeta = {
   id: "inworld",
   name: "Inworld",
-  description: "Ultra-low latency streaming TTS (<120ms). WebSocket with LINEAR16 PCM. Designed for voice agents.",
+  description: "Ultra-low latency streaming TTS (<120ms). Bidirectional WebSocket with LINEAR16 PCM. Designed for voice agents.",
   streaming: true,
   envVar: "INWORLD_API_KEY",
   defaultVoiceId: DEFAULT_VOICE,
