@@ -20,7 +20,14 @@ const Esp32VoiceAccountSchemaBase = z
     sttModel: z.string().optional(),
 
     // TTS
-    ttsProvider: z.string().optional().default("elevenlabs"),
+    ttsProvider: z.enum([
+      "elevenlabs",
+      "rime",
+      "inworld",
+      "cartesia",
+      "smallest-ai",
+      "groq-playai",
+    ]).optional().default("elevenlabs"),
     ttsApiKey: z.string().optional(),
     ttsVoiceId: z.string().optional(),
     ttsModel: z.string().optional(),
