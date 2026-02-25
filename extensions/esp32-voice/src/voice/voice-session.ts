@@ -137,6 +137,12 @@ export class VoiceSession {
   private stt: SttProvider | null = null;
   private tts: TtsProvider | null = null;
 
+  // Listening mode from the ESP32 listen start message:
+  //   "manual"   — push-to-talk (button held). Only speech_end drives processing.
+  //   "auto"     — auto-stop VAD mode. Deepgram speech_final drives processing.
+  //   "realtime" — continuous real-time mode.
+  private listenMode: "manual" | "auto" | "realtime" = "auto";
+
   // OpenClaw: dispatched via runtime.channel.reply.dispatchReplyFromConfig (in-process, no WS needed)
   private openclawConnected = false;
   private openclawWs: WebSocket | null = null; // kept for cleanup compat
@@ -209,9 +215,14 @@ export class VoiceSession {
   }
 
   /**
-   * Clean up all resources when the session ends.
+   * End the current voice session but keep the WebSocket and OpenClaw Gateway
+   * connection alive for reuse. Called on goodbye or before session restart.
    */
-  async cleanup(): Promise<void> {
+  async endSession(): Promise<void> {
+    if (this.processingAbortController) {
+      this.processingAbortController.abort();
+      this.processingAbortController = null;
+    }
     if (this.stt) {
       await this.stt.close();
       this.stt = null;
@@ -225,6 +236,16 @@ export class VoiceSession {
       this.vad = null;
       this.vadReady = false;
     }
+    this.setState("idle");
+    this.log("info", "Session ended (connection kept alive)");
+  }
+
+  /**
+   * Full cleanup — only called when the WebSocket actually closes.
+   * Destroys everything including the OpenClaw Gateway connection.
+   */
+  async cleanup(): Promise<void> {
+    await this.endSession();
     if (this.openclawWs) {
       try {
         this.openclawWs.close();
@@ -234,7 +255,7 @@ export class VoiceSession {
       this.openclawWs = null;
       this.openclawConnected = false;
     }
-    this.log("info", "Session cleaned up");
+    this.log("info", "Connection fully cleaned up");
   }
 
   // ── Private Handlers ──────────────────────────────────────────
@@ -347,6 +368,9 @@ export class VoiceSession {
         this.log("info", `Abort: ${(msg.reason as string) ?? "unknown"}`);
         await this.handleAbort();
         break;
+      case "goodbye":
+        await this.handleGoodbye();
+        break;
       default:
         break;
     }
@@ -358,6 +382,13 @@ export class VoiceSession {
     this.deviceId = (msg.deviceId as string) ?? "unknown";
     this.log("info", `Hello received — full message: ${JSON.stringify(msg).slice(0, 500)}`);
     this.log("info", `Hello from ${this.isEsp32 ? "ESP32" : "voice_client"} device: ${this.deviceId}`);
+
+    // ── Session restart: if we already have a config, this is a RE-HELLO ──
+    // End current session state but keep Gateway connection alive for reuse.
+    if (this.cfg) {
+      this.log("info", "Re-hello on existing connection — restarting session (reusing Gateway)");
+      await this.endSession();
+    }
 
     // ── OTP pairing (optional — we never block the connection on failure) ──
     const otp = msg.otp as string | undefined;
@@ -432,16 +463,21 @@ export class VoiceSession {
         sessionId: this.sessionId,
       });
     }
-    this.log("info", "Hello response sent — now connecting to OpenClaw Gateway in background");
-
-    // ── Connect to OpenClaw Gateway in background (non-blocking) ──────────
-    // Do NOT await this — the firmware is already past the hello handshake
-    // and ready for audio. Gateway connection failure is handled gracefully
-    // inside processUtterance().
-    if (this.cfg.openclawUrl) {
-      this.connectToOpenClaw().catch((err) => {
-        this.log("error", `Background Gateway connect failed: ${err}`);
-      });
+    // ── Connect to OpenClaw Gateway (only if not already connected) ──────
+    // If this is a re-hello on the same connection, the Gateway WS is already
+    // alive — skip the expensive Ed25519 handshake and reuse it instantly.
+    if (this.openclawConnected && this.openclawWs) {
+      this.log("info", "Hello response sent — reusing existing OpenClaw Gateway connection ✓");
+    } else {
+      this.log("info", "Hello response sent — connecting to OpenClaw Gateway in background");
+      // Do NOT await this — the firmware is already past the hello handshake
+      // and ready for audio. Gateway connection failure is handled gracefully
+      // inside processUtterance().
+      if (this.cfg.openclawUrl) {
+        this.connectToOpenClaw().catch((err) => {
+          this.log("error", `Background Gateway connect failed: ${err}`);
+        });
+      }
     }
   }
 
@@ -450,10 +486,22 @@ export class VoiceSession {
     const listenState = msg.state as string;
 
     if (listenState === "start") {
-      this.log("info", "Listen start");
-      // If busy, abort first (same as gateway)
+      // Read listening mode sent by the ESP32:
+      //   "manual"   → push-to-talk (button held) — VAD must NOT auto-submit
+      //   "auto"     → device-side VAD auto-stop — VAD drives submission
+      //   "realtime" → continuous realtime mode
+      const rawMode = msg.mode as string | undefined;
+      if (rawMode === "manual" || rawMode === "auto" || rawMode === "realtime") {
+        this.listenMode = rawMode;
+      } else {
+        this.listenMode = "auto"; // safe default
+      }
+      this.log("info", `Listen start (mode=${this.listenMode})`);
+      // If stuck in a non-idle state, force-abort before starting new listen.
+      // This recovers from states like streaming_tts or querying_llm that may
+      // have gotten stuck due to provider timeouts or network issues.
       if (this.state !== "idle") {
-        this.log("info", `Aborting ${this.state} for new listen`);
+        this.log("warn", `Force-aborting stuck state '${this.state}' for new listen`);
         await this.handleAbort();
       }
       await this.startListening();
@@ -493,6 +541,21 @@ export class VoiceSession {
 
     this.setState("idle");
     this.log("info", "Abort complete, back to idle");
+  }
+
+  private async handleGoodbye(): Promise<void> {
+    this.log("info", "Goodbye received — ending session, keeping connection alive");
+
+    // End the voice session (close STT/TTS) but keep WS + Gateway alive
+    await this.endSession();
+
+    // Acknowledge the goodbye so the ESP32 knows we received it
+    await this.sendJson({
+      type: "goodbye",
+      session_id: this.sessionId,
+    });
+
+    this.log("info", "Session ended gracefully — ready for new hello on same connection");
   }
 
   // ── Voice Pipeline ────────────────────────────────────────────
@@ -541,15 +604,26 @@ export class VoiceSession {
       });
     };
 
-    // Set up VAD end-of-speech callback (fired by Deepgram speech_final)
-    // This triggers processUtterance without needing a speech_end JSON message
+    // Set up VAD end-of-speech callback (fired by Deepgram speech_final).
+    //
+    // For "auto" and "realtime" modes: VAD drives processUtterance() — the
+    // device trusts the server to detect end of speech.
+    //
+    // For "manual" mode (push-to-talk, button held): do NOT auto-process on
+    // VAD. The user may pause mid-sentence while still holding the button.
+    // Only speech_end (button release) should trigger processUtterance().
     if (this.stt.onSpeechEnd !== undefined) {
-      this.stt.onSpeechEnd = () => {
-        if (this.state === "listening") {
-          this.log("info", "VAD speech_final → triggering processUtterance");
-          this.processUtterance().catch((err) => this.log("error", `processUtterance error: ${err}`));
-        }
-      };
+      if (this.listenMode === "manual") {
+        this.stt.onSpeechEnd = null; // disable VAD auto-submit for push-to-talk
+        this.log("info", "VAD auto-submit disabled (manual/push-to-talk mode)");
+      } else {
+        this.stt.onSpeechEnd = () => {
+          if (this.state === "listening") {
+            this.log("info", `VAD speech_final → triggering processUtterance (mode=${this.listenMode})`);
+            this.processUtterance().catch((err) => this.log("error", `processUtterance error: ${err}`));
+          }
+        };
+      }
     }
 
     await this.stt.connect();

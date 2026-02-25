@@ -28,7 +28,9 @@ export class DeepgramSttProvider implements SttProvider {
   private model: string;
   private language: string;
   private ws: WebSocket | null = null;
+  private audioQueue: Buffer[] = [];  // buffer for frames that arrive before WS is OPEN
   private finalTranscript = "";
+  private lastPartialTranscript = "";  // fallback when CloseStream flushes with empty final
   private finalizeResolve: ((value: string) => void) | null = null;
   private finalizePromise: Promise<string> | null = null;
 
@@ -47,9 +49,11 @@ export class DeepgramSttProvider implements SttProvider {
       language: this.language,
       interim_results: "true",
       punctuate: "true",
-      // Enable server-side VAD: fires speech_final when speech ends
-      endpointing: "300",
-      utterance_end_ms: "1000",
+      // Enable server-side VAD: fires speech_final when speech ends.
+      // 500ms silence = end of utterance. 300ms is too aggressive and
+      // cuts off users who pause briefly mid-sentence.
+      endpointing: "500",
+      utterance_end_ms: "1500",
     });
 
     const url = `${DEEPGRAM_WS_URL}?${params.toString()}`;
@@ -60,12 +64,23 @@ export class DeepgramSttProvider implements SttProvider {
       });
 
       this.finalTranscript = "";
+      this.lastPartialTranscript = "";
+      this.audioQueue = [];
       this.finalizePromise = new Promise<string>((res) => {
         this.finalizeResolve = res;
       });
 
       this.ws.on("open", () => {
-        console.log("[deepgram-stt] Connected");
+        // Flush any audio frames that arrived before the connection was ready
+        if (this.audioQueue.length > 0) {
+          console.log(`[deepgram-stt] Connected — flushing ${this.audioQueue.length} buffered audio frames`);
+          for (const frame of this.audioQueue) {
+            this.ws!.send(frame);
+          }
+          this.audioQueue = [];
+        } else {
+          console.log("[deepgram-stt] Connected");
+        }
         resolve();
       });
 
@@ -80,9 +95,10 @@ export class DeepgramSttProvider implements SttProvider {
 
       this.ws.on("close", () => {
         console.log("[deepgram-stt] Connection closed");
-        // Resolve finalize if still pending
+        this.audioQueue = [];  // discard any buffered frames
+        // Resolve finalize if still pending — use partial as fallback
         if (this.finalizeResolve) {
-          this.finalizeResolve(this.finalTranscript);
+          this.finalizeResolve(this.finalTranscript || this.lastPartialTranscript);
           this.finalizeResolve = null;
         }
       });
@@ -90,29 +106,64 @@ export class DeepgramSttProvider implements SttProvider {
   }
 
   async sendAudio(audioData: Buffer): Promise<void> {
-    if (this.ws?.readyState === WebSocket.OPEN) {
+    if (this.ws === null) return;  // not started yet, ignore
+    if (this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(audioData);
+    } else {
+      // WS exists but is still connecting — buffer the frame, flush on open
+      this.audioQueue.push(audioData);
     }
   }
 
   async finalize(): Promise<string> {
-    // Send Deepgram's CloseStream message to trigger final results
-    if (this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify({ type: "CloseStream" }));
+    // If speech_final already fired before finalize was called, return immediately.
+    if (!this.finalizeResolve) {
+      return this.finalTranscript || this.lastPartialTranscript;
     }
 
-    // Wait for the final transcript (with timeout)
     if (this.finalizePromise) {
+      // DO NOT send CloseStream immediately.
+      //
+      // When CloseStream is sent right after speech_end, Deepgram flushes
+      // its pipeline before it has finished processing the last audio frames,
+      // returning an empty transcript. Instead we let Deepgram's own VAD
+      // endpointing (300ms silence threshold) fire speech_final naturally —
+      // that gives the full transcript.
+      //
+      // CloseStream is only sent as a fallback if Deepgram's VAD hasn't
+      // fired within CLOSE_STREAM_DELAY_MS.
+      const CLOSE_STREAM_DELAY_MS = 1200;
+      const TOTAL_TIMEOUT_MS = 6000;
+
+      let closeStreamSent = false;
+      const closeTimer = setTimeout(() => {
+        if (this.ws?.readyState === WebSocket.OPEN && this.finalizeResolve) {
+          console.log("[deepgram-stt] VAD speech_final not received — sending CloseStream fallback");
+          closeStreamSent = true;
+          this.ws.send(JSON.stringify({ type: "CloseStream" }));
+        }
+      }, CLOSE_STREAM_DELAY_MS);
+
       const timeoutPromise = new Promise<string>((resolve) => {
         setTimeout(() => {
-          console.warn("[deepgram-stt] Timeout waiting for final transcript");
-          resolve(this.finalTranscript);
-        }, 5000);
+          clearTimeout(closeTimer);
+          const fallback = this.finalTranscript || this.lastPartialTranscript;
+          console.warn(`[deepgram-stt] Timeout waiting for final transcript (closeStream=${closeStreamSent}, using: "${fallback}")`);
+          if (this.finalizeResolve) {
+            this.finalizeResolve(fallback);
+            this.finalizeResolve = null;
+          }
+          resolve(fallback);
+        }, TOTAL_TIMEOUT_MS);
       });
-      return Promise.race([this.finalizePromise, timeoutPromise]);
+
+      return Promise.race([this.finalizePromise, timeoutPromise]).then((result) => {
+        clearTimeout(closeTimer);
+        return result;
+      });
     }
 
-    return this.finalTranscript;
+    return this.finalTranscript || this.lastPartialTranscript;
   }
 
   async close(): Promise<void> {
@@ -148,21 +199,27 @@ export class DeepgramSttProvider implements SttProvider {
             }
           }
 
-          // Accumulate final segments
+          // Accumulate final segments; track last partial as fallback
           if (isFinal) {
             if (this.finalTranscript) {
               this.finalTranscript += " " + text;
             } else {
               this.finalTranscript = text;
             }
+            this.lastPartialTranscript = "";  // clear partial once we have a real final
+          } else {
+            this.lastPartialTranscript = text;  // keep latest partial as fallback
           }
         }
 
         // speech_final = server-side VAD detected end of utterance
-        // Resolve finalize promise immediately so processUtterance can proceed
+        // Resolve finalize promise immediately so processUtterance can proceed.
+        // Fallback: if Deepgram flushes with empty final (happens when CloseStream
+        // is sent before is_final=true arrives), use the last seen partial instead.
         if (speechFinal && this.finalizeResolve) {
-          console.log(`[deepgram-stt] speech_final — triggering utterance end (transcript: "${this.finalTranscript}")`);
-          this.finalizeResolve(this.finalTranscript);
+          const resolved = this.finalTranscript || this.lastPartialTranscript;
+          console.log(`[deepgram-stt] speech_final — triggering utterance end (transcript: "${resolved}")`);
+          this.finalizeResolve(resolved);
           this.finalizeResolve = null;
           // Fire onSpeechEnd so the session calls processUtterance
           if (this.onSpeechEnd) {
@@ -176,7 +233,7 @@ export class DeepgramSttProvider implements SttProvider {
         // Fallback: Deepgram UtteranceEnd event (requires utterance_end_ms param)
         console.log("[deepgram-stt] UtteranceEnd received");
         if (this.finalizeResolve) {
-          this.finalizeResolve(this.finalTranscript);
+          this.finalizeResolve(this.finalTranscript || this.lastPartialTranscript);
           this.finalizeResolve = null;
         }
         if (this.onSpeechEnd) {
