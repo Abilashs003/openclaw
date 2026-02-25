@@ -389,38 +389,111 @@ async function stepSttSetup(prompter: WizardPrompter): Promise<void> {
   await prompter.note("✅ Deepgram API key saved.", "STT ready");
 }
 
-// ── Step 3 — TTS Setup (ElevenLabs) ───────────────────────────────────────────
+// ── Step 3 — TTS Setup (multi-provider) ───────────────────────────────────────
+
+const TTS_PROVIDERS_INFO = [
+  {
+    value: "elevenlabs",
+    label: "ElevenLabs",
+    hint: "Streaming, high quality, ~300ms",
+    envVar: "ELEVENLABS_API_KEY",
+    docsUrl: "https://elevenlabs.io/app/settings/api-keys",
+    defaultVoice: "21m00Tcm4TlvDq8ikWAM",
+    voiceHint: "21m00Tcm4TlvDq8ikWAM (Rachel)",
+  },
+  {
+    value: "rime",
+    label: "Rime",
+    hint: "Streaming, native PCM, low latency",
+    envVar: "RIME_API_KEY",
+    docsUrl: "https://rime.ai/docs",
+    defaultVoice: "arcas",
+    voiceHint: "arcas",
+  },
+  {
+    value: "inworld",
+    label: "Inworld",
+    hint: "Streaming, <120ms, best latency",
+    envVar: "INWORLD_API_KEY",
+    docsUrl: "https://inworld.ai/tts-api",
+    defaultVoice: "inworld.neutral",
+    voiceHint: "inworld.neutral",
+  },
+  {
+    value: "cartesia",
+    label: "Cartesia",
+    hint: "Streaming, ~80ms, production-grade",
+    envVar: "CARTESIA_API_KEY",
+    docsUrl: "https://docs.cartesia.ai",
+    defaultVoice: "a0e99841-438c-4a64-b679-ae501e7d6091",
+    voiceHint: "a0e99841-... (Barbershop Man)",
+  },
+  {
+    value: "smallest-ai",
+    label: "Smallest.ai",
+    hint: "Streaming, raw PCM, 24kHz",
+    envVar: "SMALLEST_AI_API_KEY",
+    docsUrl: "https://waves-docs.smallest.ai",
+    defaultVoice: "emily",
+    voiceHint: "emily",
+  },
+  {
+    value: "groq-playai",
+    label: "Groq PlayAI",
+    hint: "Batch (cheapest), reuses GROQ_API_KEY",
+    envVar: "GROQ_API_KEY",
+    docsUrl: "https://console.groq.com/docs/text-to-speech",
+    defaultVoice: "Fritz-PlayAI",
+    voiceHint: "Fritz-PlayAI",
+  },
+] as const;
 
 async function stepTtsSetup(prompter: WizardPrompter): Promise<void> {
-  const existing = getEnvValue("ELEVENLABS_API_KEY");
+  const currentProvider = getEnvValue("TTS_PROVIDER") ?? "elevenlabs";
 
-  if (existing) {
+  const selectedProvider = String(
+    await prompter.select({
+      message: "Which TTS provider do you want to use?",
+      options: TTS_PROVIDERS_INFO.map((p) => ({
+        value: p.value,
+        label: `${p.label}`,
+        hint: p.hint,
+      })),
+      initialValue: currentProvider,
+    }),
+  );
+
+  const info = TTS_PROVIDERS_INFO.find((p) => p.value === selectedProvider)!;
+  const existingKey = getEnvValue(info.envVar);
+
+  if (existingKey) {
     const update = await prompter.confirm({
-      message: `ElevenLabs API key already set (${existing.slice(0, 8)}...). Update it?`,
+      message: `${info.label} API key already set (${existingKey.slice(0, 8)}...). Update it?`,
       initialValue: false,
     });
-    if (!update) return;
+    if (!update) {
+      saveToEnv({ TTS_PROVIDER: selectedProvider });
+      await prompter.note(`✅ TTS provider set to ${info.label}.`, "TTS ready");
+      return;
+    }
   } else {
     await prompter.note(
       [
-        "ESP32 Voice uses ElevenLabs for Text-to-Speech (TTS).",
-        "You need an ElevenLabs API key.",
+        `ESP32 Voice will use ${info.label} for Text-to-Speech (TTS).`,
+        `You need a ${info.label} API key.`,
         "",
-        `${formatDocsLink("https://elevenlabs.io/app/settings/api-keys", "Get ElevenLabs API key →")}`,
-        "",
-        "Sign up → Profile → API Keys → Create → Copy it below.",
+        `${formatDocsLink(info.docsUrl, `Get ${info.label} API key →`)}`,
       ].join("\n"),
-      "TTS Setup — ElevenLabs",
+      `TTS Setup — ${info.label}`,
     );
   }
 
   const key = String(
     await prompter.text({
-      message: "ElevenLabs API key",
-      placeholder: "sk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      message: `${info.label} API key`,
+      placeholder: "Your API key",
       validate: (v) => {
-        const k = String(v ?? "").trim();
-        if (!k) return "Required";
+        if (!String(v ?? "").trim()) return "Required";
         return undefined;
       },
     }),
@@ -428,26 +501,21 @@ async function stepTtsSetup(prompter: WizardPrompter): Promise<void> {
 
   const voiceId = String(
     await prompter.text({
-      message: "ElevenLabs Voice ID (optional, press Enter for default)",
-      placeholder: "21m00Tcm4TlvDq8ikWAM",
-      initialValue: getEnvValue("ELEVENLABS_VOICE_ID") ?? "",
+      message: `Voice ID (optional, press Enter for default: ${info.voiceHint})`,
+      placeholder: info.defaultVoice,
+      initialValue: getEnvValue(`${info.envVar.replace("_API_KEY", "")}_VOICE_ID`) ?? "",
     }),
   ).trim();
 
-  const model = String(
-    await prompter.text({
-      message: "ElevenLabs model (optional, press Enter for default)",
-      placeholder: "eleven_flash_v2_5",
-      initialValue: getEnvValue("ELEVENLABS_MODEL_ID") ?? "",
-    }),
-  ).trim();
-
-  const toSave: Record<string, string> = { ELEVENLABS_API_KEY: key };
-  if (voiceId) toSave.ELEVENLABS_VOICE_ID = voiceId;
-  if (model) toSave.ELEVENLABS_MODEL_ID = model;
+  const toSave: Record<string, string> = {
+    TTS_PROVIDER: selectedProvider,
+    [info.envVar]: key,
+  };
+  const voiceEnvKey = `${info.envVar.replace("_API_KEY", "")}_VOICE_ID`;
+  if (voiceId) toSave[voiceEnvKey] = voiceId;
   saveToEnv(toSave);
 
-  await prompter.note("✅ ElevenLabs API key saved.", "TTS ready");
+  await prompter.note(`✅ ${info.label} API key saved.`, "TTS ready");
 }
 
 // ── Step 4 — Add Device ────────────────────────────────────────────────────────
@@ -514,7 +582,9 @@ export const esp32VoiceOnboardingAdapter: ChannelOnboardingAdapter = {
   getStatus: async ({ cfg }) => {
     const hasPair = Boolean(getEnvValue("CHEEKO_PAIR"));
     const hasSTT = Boolean(getEnvValue("DEEPGRAM_API_KEY"));
-    const hasTTS = Boolean(getEnvValue("ELEVENLABS_API_KEY"));
+    const ttsProvider = getEnvValue("TTS_PROVIDER") ?? "elevenlabs";
+    const ttsMeta = TTS_PROVIDERS_INFO.find((p) => p.value === ttsProvider) ?? TTS_PROVIDERS_INFO[0];
+    const hasTTS = Boolean(getEnvValue(ttsMeta.envVar));
     const configured = hasPair && hasSTT && hasTTS;
 
     const overallStatus = configured ? "configured" : "needs setup";
@@ -522,7 +592,7 @@ export const esp32VoiceOnboardingAdapter: ChannelOnboardingAdapter = {
     lines.push(`ESP32 Voice: ${overallStatus}`);
     lines.push(`  Cheeko dashboard: ${hasPair ? "✅ connected" : "❌ not connected"}`);
     lines.push(`  STT (Deepgram):   ${hasSTT ? "✅ configured" : "❌ missing key"}`);
-    lines.push(`  TTS (ElevenLabs): ${hasTTS ? "✅ configured" : "❌ missing key"}`);
+    lines.push(`  TTS (${ttsMeta.label}): ${hasTTS ? "✅ configured" : "❌ missing key"}`);
 
     return {
       channel: "esp32voice",
@@ -622,7 +692,7 @@ export const esp32VoiceOnboardingAdapter: ChannelOnboardingAdapter = {
         `  Voice server : ws://${localIp}:${VOICE_PORT}/`,
         `  Dashboard    : ${DASHBOARD_URL}`,
         `  STT          : Deepgram ${getEnvValue("DEEPGRAM_MODEL") ?? "(default model)"}`,
-        `  TTS          : ElevenLabs ${getEnvValue("ELEVENLABS_VOICE_ID") ?? "(default voice)"}`,
+        `  TTS          : ${(TTS_PROVIDERS_INFO.find((p) => p.value === (getEnvValue("TTS_PROVIDER") ?? "elevenlabs")) ?? TTS_PROVIDERS_INFO[0]).label} (${getEnvValue((TTS_PROVIDERS_INFO.find((p) => p.value === (getEnvValue("TTS_PROVIDER") ?? "elevenlabs")) ?? TTS_PROVIDERS_INFO[0]).envVar.replace("_API_KEY", "") + "_VOICE_ID") ?? "default voice"})`,
         "",
         "Start the voice server:",
         "  openclaw gateway",
