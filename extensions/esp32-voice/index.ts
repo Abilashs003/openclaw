@@ -7,6 +7,11 @@ import { startStandaloneVoiceServer } from "./src/voice/voice-endpoint.js";
 // Import STT/TTS providers to trigger auto-registration with the registries
 import "./src/stt/deepgram.js";
 import "./src/tts/elevenlabs.js";
+import "./src/tts/rime.js";
+import "./src/tts/inworld.js";
+import "./src/tts/cartesia.js";
+import "./src/tts/smallest-ai.js";
+import "./src/tts/groq-playai.js";
 
 const VOICE_PORT = parseInt(process.env.ESP32_VOICE_PORT ?? "8765", 10);
 
