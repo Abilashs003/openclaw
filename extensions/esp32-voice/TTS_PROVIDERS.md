@@ -1,7 +1,7 @@
 # TTS Providers — ESP32 Voice Plugin
 
-This document covers the TTS provider system architecture, the current ElevenLabs integration,
-and a full evaluation of alternative providers for the ESP32 voice pipeline.
+This document covers the TTS provider system architecture, all implemented providers,
+and how to add new providers to the ESP32 voice pipeline.
 
 ---
 
@@ -10,10 +10,9 @@ and a full evaluation of alternative providers for the ESP32 voice pipeline.
 1. [Architecture Overview](#1-architecture-overview)
 2. [Audio Pipeline Requirements](#2-audio-pipeline-requirements)
 3. [Provider Interface](#3-provider-interface)
-4. [Current Provider — ElevenLabs](#4-current-provider--elevenlabs)
-5. [Alternative Providers — Evaluation](#5-alternative-providers--evaluation)
-6. [Recommendation](#6-recommendation)
-7. [How to Add a New Provider](#7-how-to-add-a-new-provider)
+4. [Current Providers](#4-current-providers)
+5. [Provider Details](#5-provider-details)
+6. [How to Add a New Provider](#6-how-to-add-a-new-provider)
 
 ---
 
@@ -49,7 +48,12 @@ TtsProvider instance
 |------|---------|
 | [src/tts/tts-provider.ts](src/tts/tts-provider.ts) | Interface + types |
 | [src/tts/tts-registry.ts](src/tts/tts-registry.ts) | Global registry singleton |
-| [src/tts/elevenlabs.ts](src/tts/elevenlabs.ts) | ElevenLabs implementation |
+| [src/tts/elevenlabs.ts](src/tts/elevenlabs.ts) | ElevenLabs implementation (reference) |
+| [src/tts/rime.ts](src/tts/rime.ts) | Rime implementation |
+| [src/tts/inworld.ts](src/tts/inworld.ts) | Inworld implementation |
+| [src/tts/cartesia.ts](src/tts/cartesia.ts) | Cartesia implementation |
+| [src/tts/smallest-ai.ts](src/tts/smallest-ai.ts) | Smallest.ai implementation |
+| [src/tts/groq-playai.ts](src/tts/groq-playai.ts) | Groq PlayAI implementation |
 | [src/voice/voice-session.ts](src/voice/voice-session.ts) | TTS consumer |
 
 ---
@@ -102,9 +106,37 @@ export interface TtsProvider {
 
 ---
 
-## 4. Current Provider — ElevenLabs
+## 4. Current Providers
 
-**File:** [src/tts/elevenlabs.ts](src/tts/elevenlabs.ts)
+All 6 providers are implemented and available. Select via `TTS_PROVIDER` in `~/.openclaw/.env`.
+
+| Provider | ID | Env Var | Transport | Latency | Status |
+|----------|----|---------|-----------|---------|--------|
+| ElevenLabs | `elevenlabs` | `ELEVENLABS_API_KEY` | WebSocket | ~300ms | ✅ Implemented |
+| Rime | `rime` | `RIME_API_KEY` | WebSocket | Low | ✅ Implemented |
+| Inworld | `inworld` | `INWORLD_API_KEY` | WebSocket | <120ms | ✅ Implemented |
+| Cartesia | `cartesia` | `CARTESIA_API_KEY` | WebSocket | ~80ms | ✅ Implemented |
+| Smallest.ai | `smallest-ai` | `SMALLEST_AI_API_KEY` | WebSocket | Low | ✅ Implemented |
+| Groq PlayAI | `groq-playai` | `GROQ_API_KEY` | HTTP batch | Batch | ✅ Implemented |
+
+**Quick setup:**
+
+```bash
+# In ~/.openclaw/.env — choose any provider:
+TTS_PROVIDER=cartesia
+CARTESIA_API_KEY=sk_car_...
+
+# Or interactively during onboarding:
+openclaw channels add --channel esp32voice
+```
+
+---
+
+## 5. Provider Details
+
+### 5.1 ElevenLabs
+
+**File:** [src/tts/elevenlabs.ts](src/tts/elevenlabs.ts) ✅ Implemented
 
 | Property | Value |
 |----------|-------|
@@ -135,161 +167,127 @@ ELEVENLABS_MODEL_ID=eleven_turbo_v2_5       # optional
 
 ---
 
-## 5. Alternative Providers — Evaluation
+### 5.2 Rime
 
-### Implemented Providers
-
-All 5 providers below are implemented. Set `TTS_PROVIDER=<id>` in `~/.openclaw/.env` to activate.
-
-| Provider | ID | Env Var | Streaming | Latency | File |
-|----------|----|---------|-----------|---------|------|
-| Rime | `rime` | `RIME_API_KEY` | Yes (WS) | Low | `src/tts/rime.ts` |
-| Inworld | `inworld` | `INWORLD_API_KEY` | Yes (WS) | <120ms | `src/tts/inworld.ts` |
-| Cartesia | `cartesia` | `CARTESIA_API_KEY` | Yes (WS) | ~80ms | `src/tts/cartesia.ts` |
-| Smallest.ai | `smallest-ai` | `SMALLEST_AI_API_KEY` | Yes (WS) | Low | `src/tts/smallest-ai.ts` |
-| Groq PlayAI | `groq-playai` | `GROQ_API_KEY` | No (batch) | High | `src/tts/groq-playai.ts` |
-
----
-
-Evaluated against the ESP32 voice pipeline requirements (24kHz PCM, streaming preferred).
-
----
-
-### 5.1 Rime
+**File:** [src/tts/rime.ts](src/tts/rime.ts) ✅ Implemented
 
 | Property | Value |
 |----------|-------|
-| Website | https://rime.ai |
-| API endpoint | `wss://users.rime.ai/v1/rime-tts` |
-| Transport | **WebSocket** (preferred) or HTTP |
-| Output | **PCM native** (no base64 needed in non-JSON mode) |
-| Sample rate | Configurable: 8k / 16k / 22050 / **24k** / 32k / 44.1k / 48k |
-| Streaming | **Yes** — `reduce_latency` flag available |
+| Provider ID | `rime` |
 | Env var | `RIME_API_KEY` |
-| LiveKit support | Yes (managed inference) |
+| Website | https://rime.ai |
+| Transport | WebSocket (`wss://users.rime.ai/v1/rime-tts`) |
+| Output | Binary PCM native (no base64 decode step) |
+| Sample rate | 24000 Hz |
+| Streaming | Yes — `reduce_latency` mode enabled |
+| Default voice | `arcas` |
+| Default model | `mist` |
 
-**Verdict: Best fit for this plugin.**
-- Nearly identical WebSocket pattern to ElevenLabs
-- Native PCM output — no base64 decode step
-- `reduce_latency` mode for voice assistant use cases
-- Clean implementation — least code to write
+```bash
+RIME_API_KEY=...
+RIME_VOICE_ID=arcas   # optional
+```
 
 ---
 
-### 5.2 Inworld TTS
+### 5.3 Inworld
+
+**File:** [src/tts/inworld.ts](src/tts/inworld.ts) ✅ Implemented
 
 | Property | Value |
 |----------|-------|
-| Website | https://inworld.ai/tts |
-| Transport | **WebSocket** |
-| Output | **LINEAR16 PCM** (default), also MP3, Opus |
-| Sample rate | 16000 / **24000** / 48000 Hz |
-| Streaming | **Yes** — persistent connection, interruption support |
-| Latency | **<120ms P90** (Mini model) |
+| Provider ID | `inworld` |
 | Env var | `INWORLD_API_KEY` |
-| LiveKit support | Yes (managed inference) |
+| Website | https://inworld.ai/tts-api |
+| Transport | WebSocket (`wss://studio.inworld.ai/v1/tts`) |
+| Output | LINEAR16 PCM (16-bit LE, 24kHz) |
+| Streaming | Yes — persistent connection |
+| Latency | **<120ms P90** (best of all providers) |
+| Default voice | `inworld.neutral` |
+| Default model | `tts-1.5-mini` |
 
-**Verdict: Best latency.**
-- Fastest of all evaluated providers (<120ms)
-- WebSocket with direct PCM LINEAR16 — perfect match
-- Designed specifically for voice agents
-- Marketed as ElevenLabs alternative with better latency
+```bash
+INWORLD_API_KEY=...
+INWORLD_VOICE_ID=inworld.neutral   # optional
+```
 
 ---
 
-### 5.3 Cartesia
+### 5.4 Cartesia
+
+**File:** [src/tts/cartesia.ts](src/tts/cartesia.ts) ✅ Implemented
 
 | Property | Value |
 |----------|-------|
-| Website | https://cartesia.ai |
-| Transport | **WebSocket** |
-| Output | PCM (raw bytes) |
-| Sample rate | **24000** Hz (and others) |
-| Streaming | **Yes** |
-| Latency | **~80ms** — fastest of all options |
+| Provider ID | `cartesia` |
 | Env var | `CARTESIA_API_KEY` |
-| LiveKit support | Yes (managed inference) |
+| Website | https://cartesia.ai |
+| Transport | WebSocket (`wss://api.cartesia.ai/tts/websocket`) |
+| Output | PCM (raw bytes, 24kHz) |
+| Streaming | Yes |
+| Latency | **~80ms** — production-grade |
+| Default voice | `a0e99841-438c-4a64-b679-ae501e7d6091` (Barbershop Man) |
+| Default model | `sonic-english` |
 
-**Verdict: Best for production / lowest latency.**
-- ~80ms latency — industry leading
-- WebSocket streaming with PCM
-- Widely used in voice agent frameworks (Pipecat, LiveKit)
-- Highly stable API
+```bash
+CARTESIA_API_KEY=sk_car_...
+CARTESIA_VOICE_ID=a0e99841-438c-4a64-b679-ae501e7d6091   # optional
+```
 
 ---
 
-### 5.4 Smallest.ai (Waves)
+### 5.5 Smallest.ai
+
+**File:** [src/tts/smallest-ai.ts](src/tts/smallest-ai.ts) ✅ Implemented
 
 | Property | Value |
 |----------|-------|
+| Provider ID | `smallest-ai` |
+| Env var | `SMALLEST_AI_API_KEY` |
 | Website | https://smallest.ai |
 | Docs | https://waves-docs.smallest.ai |
-| Transport | **WebSocket** |
-| Output | base64-encoded audio chunks |
-| Sample rate | **24000** Hz supported |
-| Streaming | **Yes** — chunk + complete pattern |
-| Env var | `SMALLEST_API_KEY` |
+| Transport | WebSocket (`wss://waves-api.smallest.ai/api/v1/lightning/get_speech`) |
+| Output | base64-encoded raw PCM chunks (24kHz, no WAV header) |
+| Streaming | Yes — chunk + `{ status: "complete" }` pattern |
+| Default voice | `emily` |
+| Default model | `lightning` |
 
-**Verdict: Good option, needs audio format verification.**
-- WebSocket streaming confirmed
-- Audio comes as base64 chunks (same pattern as ElevenLabs)
-- Need to verify output is raw PCM vs MP3 (docs are not explicit)
-- 20-second inactivity timeout (manageable)
+```bash
+SMALLEST_AI_API_KEY=...
+SMALLEST_AI_VOICE_ID=emily   # optional
+```
+
+**Note:** Audio is confirmed raw PCM (not MP3). Uses `add_wav_header: false` and
+`sample_rate: 24000` in request payload. 20-second server-side inactivity timeout applies.
 
 ---
 
-### 5.5 Groq PlayAI
+### 5.6 Groq PlayAI
+
+**File:** [src/tts/groq-playai.ts](src/tts/groq-playai.ts) ✅ Implemented
 
 | Property | Value |
 |----------|-------|
-| Model | `playai-tts` / `playai-tts-arabic` |
-| API endpoint | `POST https://api.groq.com/openai/v1/audio/speech` |
-| Transport | **HTTP batch only** (no WebSocket) |
-| Output | WAV / MP3 / FLAC (need to strip WAV header for PCM) |
-| Sample rate | **24000** Hz (default) |
-| Streaming | **No** — full file returned at once |
+| Provider ID | `groq-playai` |
 | Env var | `GROQ_API_KEY` |
-| Speed | ~140 chars/sec on GroqCloud |
+| Website | https://console.groq.com |
+| Transport | HTTP POST (`https://api.groq.com/openai/v1/audio/speech`) |
+| Output | WAV binary → strip 44-byte header → raw PCM (24kHz) |
+| Streaming | **No** (batch) |
+| Default voice | `Fritz-PlayAI` |
+| Default model | `playai-tts` |
 
-**Verdict: Feasible but adds latency.**
-- No streaming = entire synthesis must complete before ESP32 hears anything
-- Good as a cost-effective fallback (Groq is cheap)
-- WAV format: strip 44-byte header → raw PCM
-- Useful for non-realtime use cases or development/testing
+```bash
+GROQ_API_KEY=gsk_...
+GROQ_VOICE_ID=Fritz-PlayAI   # optional
+```
 
----
-
-### 5.6 Deepgram Aura TTS
-
-| Property | Value |
-|----------|-------|
-| Transport | **WebSocket** |
-| Output | PCM |
-| Sample rate | **24000** Hz |
-| Streaming | **Yes** |
-| Env var | `DEEPGRAM_API_KEY` (same key as STT!) |
-| Note | Same API key as Deepgram STT already required |
-
-**Verdict: Convenient if already using Deepgram STT.**
-- No extra API key needed — already have `DEEPGRAM_API_KEY`
-- WebSocket streaming, PCM output
-- Quality not as high as ElevenLabs/Cartesia/Rime for voice assistants
+**Note:** Batch-only — full synthesis must complete before ESP32 playback begins.
+Cheapest option; reuses `GROQ_API_KEY` if already set for STT.
 
 ---
 
-## 6. Recommendation
-
-| Priority | Provider | Reason |
-|----------|----------|--------|
-| **1st — Next to implement** | **Rime** | Closest API shape to ElevenLabs, native PCM, streaming, `reduce_latency` mode |
-| **2nd** | **Inworld** | Best latency (<120ms), WebSocket + LINEAR16 PCM |
-| **3rd** | **Cartesia** | ~80ms latency, production-grade stability |
-| **4th** | **Deepgram Aura** | Zero new API key needed (already have Deepgram) |
-| **Fallback** | **Groq PlayAI** | Batch only, but cheap and simple for non-realtime |
-
----
-
-## 7. How to Add a New Provider
+## 6. How to Add a New Provider
 
 ### Step 1 — Create the provider file
 
@@ -368,7 +366,12 @@ MYPROVIDER_API_KEY=<your-myprovider-api-key>
 
 Add `"myprovider"` to the `ttsProvider` enum in the Zod schema.
 
-### Step 6 — Test
+### Step 6 — Add to onboarding
+
+Add an entry to `TTS_PROVIDERS_INFO` in `src/onboarding.ts` with `value`, `label`,
+`hint`, `envVar`, `docsUrl`, `defaultVoice`, and `voiceHint`.
+
+### Step 7 — Test
 
 Set `TTS_PROVIDER=myprovider` and `MYPROVIDER_API_KEY=...` in your `.env`, start the
 gateway, connect an ESP32 (or the test client), and verify audio plays back correctly.

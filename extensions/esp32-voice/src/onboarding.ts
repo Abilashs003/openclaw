@@ -612,7 +612,7 @@ export const esp32VoiceOnboardingAdapter: ChannelOnboardingAdapter = {
         "Steps:",
         "  1. Connect to Cheeko dashboard",
         "  2. Set up Speech-to-Text (Deepgram)",
-        "  3. Set up Text-to-Speech (ElevenLabs)",
+        "  3. Set up Text-to-Speech (TTS provider)",
         "  4. Add your device",
         "",
         "Run: openclaw gateway   when done to start the voice server.",
