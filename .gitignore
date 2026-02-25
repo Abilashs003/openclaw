@@ -93,3 +93,13 @@ package-lock.json
 
 # Local iOS signing overrides
 apps/ios/LocalSigning.xcconfig
+
+
+.env
+venv
+node_modules
+CLAUDE.md
+clerk-nextjs-guide
+
+# Git worktrees
+.worktrees/
