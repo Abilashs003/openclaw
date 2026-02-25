@@ -186,32 +186,58 @@ export function createVoiceWebSocketServer(): WebSocketServer {
   wss.on("connection", (ws: WebSocket) => {
     const sessionId = crypto.randomUUID().replace(/-/g, "");
     const session = new VoiceSession(ws, sessionId);
-    console.log(`[esp32voice] Voice client connected [${sessionId.slice(0, 8)}]`);
+    const tag = sessionId.slice(0, 8);
+    console.log(`[esp32voice] Voice client connected [${tag}]`);
+
+    // ── Keep-alive: ping every 30 seconds ──
+    // ESP32 WebSocket connections can silently die (WiFi roaming, NAT timeout).
+    // Periodic pings detect dead connections early instead of waiting for a
+    // send failure during the next conversation.
+    let pongReceived = true;
+    const pingInterval = setInterval(() => {
+      if (ws.readyState !== WebSocket.OPEN) {
+        clearInterval(pingInterval);
+        return;
+      }
+      if (!pongReceived) {
+        console.log(`[esp32voice] [${tag}] No pong received — terminating dead connection`);
+        ws.terminate();
+        return;
+      }
+      pongReceived = false;
+      ws.ping();
+    }, 30_000);
+
+    ws.on("pong", () => {
+      pongReceived = true;
+    });
 
     ws.on("message", async (data: Buffer | string, isBinary: boolean) => {
       // ── Raw message debug logging ─────────────────────────────
       if (isBinary || Buffer.isBuffer(data)) {
         const buf = Buffer.isBuffer(data) ? data : Buffer.from(data as ArrayBuffer);
-        console.log(`[esp32voice] [${sessionId.slice(0, 8)}] ← BINARY frame: ${buf.length} bytes`);
+        console.log(`[esp32voice] [${tag}] ← BINARY frame: ${buf.length} bytes`);
         await session.handleMessage(buf);
       } else {
         const text = typeof data === "string" ? data : data.toString();
-        console.log(`[esp32voice] [${sessionId.slice(0, 8)}] ← TEXT message: ${text.slice(0, 300)}`);
+        console.log(`[esp32voice] [${tag}] ← TEXT message: ${text.slice(0, 300)}`);
         try {
           await session.handleMessage(text);
         } catch (err) {
-          console.error(`[esp32voice] [${sessionId.slice(0, 8)}] Message error: ${err}`);
+          console.error(`[esp32voice] [${tag}] Message error: ${err}`);
         }
       }
     });
 
     ws.on("close", async () => {
-      console.log(`[esp32voice] [${sessionId.slice(0, 8)}] Voice client disconnected`);
+      clearInterval(pingInterval);
+      console.log(`[esp32voice] [${tag}] Voice client disconnected`);
       await session.cleanup();
     });
 
     ws.on("error", async (err) => {
-      console.error(`[esp32voice] [${sessionId.slice(0, 8)}] WebSocket error: ${err.message}`);
+      clearInterval(pingInterval);
+      console.error(`[esp32voice] [${tag}] WebSocket error: ${err.message}`);
       await session.cleanup();
     });
   });
