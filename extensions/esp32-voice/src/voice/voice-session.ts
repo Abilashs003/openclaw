@@ -83,10 +83,11 @@ const OUTPUT_FRAME_MS = 60;
 const OUTPUT_SAMPLES_PER_FRAME = (OUTPUT_SAMPLE_RATE * OUTPUT_FRAME_MS) / 1000; // 1440
 const OUTPUT_FRAME_BYTES = OUTPUT_SAMPLES_PER_FRAME * 2; // 2880 bytes (16-bit PCM)
 
-// Incoming audio parameters (ESP32 → server): 16kHz, 1ch, 60ms frames
+// Incoming audio parameters (ESP32 → server): 16kHz, 1ch
+// Frame duration varies by firmware (XiaoZhi uses 20ms, others may use 60ms).
+// The actual frame duration is read from the hello handshake and stored per-session.
 const INPUT_SAMPLE_RATE = 16000;
-const INPUT_FRAME_MS = 60;
-const INPUT_SAMPLES_PER_FRAME = (INPUT_SAMPLE_RATE * INPUT_FRAME_MS) / 1000; // 960
+const DEFAULT_INPUT_FRAME_MS = 60;
 
 export type VoiceSessionState =
   | "idle"
@@ -153,6 +154,9 @@ export class VoiceSession {
   // Silero VAD for local speech-end detection
   private vad: SileroVad | null = null;
   private vadReady = false;
+
+  // Input audio frame duration from ESP32 hello (default 60ms, XiaoZhi sends 20ms)
+  private inputFrameMs = DEFAULT_INPUT_FRAME_MS;
 
   constructor(ws: WebSocket, sessionId: string) {
     this.ws = ws;
@@ -266,7 +270,8 @@ export class VoiceSession {
     // We auto-initialize from env vars and send the server hello immediately.
     if (!this.cfg) {
       this.isEsp32 = true;
-      this.log("info", "First binary frame before hello — auto-initializing (XiaoZhi firmware)");
+      this.inputFrameMs = 20; // XiaoZhi firmware uses 20ms frames
+      this.log("info", "First binary frame before hello — auto-initializing (XiaoZhi firmware, 20ms frames)");
 
       const gatewayUrl   = process.env.OPENCLAW_GATEWAY_URL   ?? "ws://127.0.0.1:18789";
       const gatewayToken = process.env.OPENCLAW_GATEWAY_TOKEN ?? "";
@@ -325,7 +330,12 @@ export class VoiceSession {
     if (this.vadReady && this.vad) {
       try {
         const decoder = await getOpusDecoder();
-        const pcmBuffer: Buffer = Buffer.from(decoder.decode(opusFrame, INPUT_SAMPLES_PER_FRAME));
+        // Use the actual frame duration from the ESP32 hello (e.g. 20ms for XiaoZhi)
+        // instead of a hardcoded 60ms, otherwise the decoder returns a buffer
+        // padded with zeros that dilutes the speech signal below VAD threshold.
+        const samplesPerFrame = (INPUT_SAMPLE_RATE * this.inputFrameMs) / 1000;
+        const decoded = decoder.decode(opusFrame, samplesPerFrame);
+        const pcmBuffer: Buffer = Buffer.from(decoded);
         // Convert Buffer (Int16) to Int16Array for VAD
         const pcmInt16 = new Int16Array(
           pcmBuffer.buffer,
@@ -380,6 +390,14 @@ export class VoiceSession {
     // Detect ESP32 client
     this.isEsp32 = Boolean(msg.transport || msg.audio_params || typeof msg.version === "number");
     this.deviceId = (msg.deviceId as string) ?? "unknown";
+
+    // Read input frame duration from hello audio_params (XiaoZhi sends 20ms, default 60ms)
+    const audioParams = msg.audio_params as Record<string, unknown> | undefined;
+    if (audioParams?.frame_duration) {
+      this.inputFrameMs = Number(audioParams.frame_duration);
+      this.log("info", `Input frame duration from hello: ${this.inputFrameMs}ms`);
+    }
+
     this.log("info", `Hello received — full message: ${JSON.stringify(msg).slice(0, 500)}`);
     this.log("info", `Hello from ${this.isEsp32 ? "ESP32" : "voice_client"} device: ${this.deviceId}`);
 

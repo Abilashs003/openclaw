@@ -1,6 +1,6 @@
 {
   "name": "@cheeko-ai/esp32-voice",
-  "version": "2026.2.23.5",
+  "version": "2026.2.24",
   "private": false,
   "description": "OpenClaw ESP32 Voice channel plugin — voice-to-text-to-voice device integration with pluggable STT/TTS providers",
   "type": "module",

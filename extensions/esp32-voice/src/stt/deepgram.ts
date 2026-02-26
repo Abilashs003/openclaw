@@ -169,7 +169,12 @@ export class DeepgramSttProvider implements SttProvider {
   async close(): Promise<void> {
     if (this.ws) {
       try {
-        this.ws.close();
+        // Use terminate() if still connecting — close() throws on CONNECTING state
+        if (this.ws.readyState === this.ws.CONNECTING) {
+          this.ws.terminate();
+        } else {
+          this.ws.close();
+        }
       } catch {
         // Ignore close errors
       }

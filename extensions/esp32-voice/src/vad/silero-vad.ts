@@ -55,6 +55,14 @@ const WINDOW_SIZE = 512;
 /** LSTM hidden state size for Silero v5 */
 const STATE_SIZE = 128;
 
+/**
+ * Context size — samples prepended to each inference window.
+ * This provides continuity between windows, matching the reference
+ * implementation (pipecat-ai/pipecat). Without this context, the model
+ * produces near-zero probabilities for real speech.
+ */
+const CONTEXT_SIZE = 64; // 64 for 16kHz, 32 for 8kHz
+
 // ── VAD Processor ──────────────────────────────────────────────
 
 export type VadEvent = "speech_start" | "speech_end";
@@ -78,6 +86,10 @@ export class SileroVad {
 
   // PCM buffer for accumulating audio into 512-sample windows
   private pcmBuffer: Float32Array = new Float32Array(0);
+
+  // Context window — last 64 samples from previous inference, prepended to next window.
+  // This provides cross-window continuity required by the Silero ONNX model.
+  private context: Float32Array = new Float32Array(CONTEXT_SIZE);
 
   // Callbacks
   onSpeechStart: (() => void | Promise<void>) | null = null;
@@ -166,8 +178,14 @@ export class SileroVad {
     const ortModule = await getOrt();
     const Tensor = ortModule.Tensor;
 
-    // Input tensor: [1, 512]
-    const inputTensor = new Tensor("float32", window, [1, WINDOW_SIZE]);
+    // Prepend context (64 samples) to the 512-sample window → [1, 576].
+    // This cross-window overlap is required by the Silero ONNX model for
+    // accurate speech probability — without it, output stays near zero.
+    const inputWithContext = new Float32Array(CONTEXT_SIZE + WINDOW_SIZE);
+    inputWithContext.set(this.context);
+    inputWithContext.set(window, CONTEXT_SIZE);
+
+    const inputTensor = new Tensor("float32", inputWithContext, [1, CONTEXT_SIZE + WINDOW_SIZE]);
 
     // Sample rate tensor
     const srTensor = new Tensor("int64", BigInt64Array.from([BigInt(SAMPLE_RATE)]), []);
@@ -186,6 +204,9 @@ export class SileroVad {
     // Update LSTM state from output
     const stateN = results.stateN;
     if (stateN?.data) this.state = new Float32Array(stateN.data);
+
+    // Save last 64 samples from the context+window as context for next inference
+    this.context = inputWithContext.slice(-CONTEXT_SIZE);
 
     // Speech probability is the output tensor
     const output = results.output;
@@ -256,6 +277,7 @@ export class SileroVad {
    */
   resetState(): void {
     this.state = new Float32Array(2 * 1 * STATE_SIZE);
+    this.context = new Float32Array(CONTEXT_SIZE);
     this.isSpeaking = false;
     this.speechStartedAt = 0;
     this.lastSpeechAt = 0;
