@@ -1183,7 +1183,192 @@ git commit -m "feat(esp32-voice): dynamic STT provider resolution in voice-sessi
 
 ---
 
-## Task 8: Unit Tests
+## Task 8: Onboarding — Multi-Provider STT Selection UI
+
+**Files:**
+- Modify: `extensions/esp32-voice/src/onboarding.ts:341-390,582-604,690-696`
+
+Mirror the TTS provider selection pattern (`stepTtsSetup` / `TTS_PROVIDERS_INFO`) for STT.
+
+**Step 1: Add `STT_PROVIDERS_INFO` array**
+
+Add before `stepSttSetup()` (around line 339), mirroring `TTS_PROVIDERS_INFO`:
+
+```typescript
+const STT_PROVIDERS_INFO = [
+  {
+    value: "deepgram",
+    label: "Deepgram",
+    hint: "Streaming, Opus native, ~150ms, $0.46/hr",
+    envVar: "DEEPGRAM_API_KEY",
+    docsUrl: "https://console.deepgram.com",
+    keyPlaceholder: "dg-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  },
+  {
+    value: "soniox",
+    label: "Soniox",
+    hint: "Streaming, <200ms, cheapest ($0.12/hr)",
+    envVar: "SONIOX_API_KEY",
+    docsUrl: "https://console.soniox.com",
+    keyPlaceholder: "Your API key",
+  },
+  {
+    value: "elevenlabs-stt",
+    label: "ElevenLabs STT",
+    hint: "Streaming, ~150ms, 90+ languages",
+    envVar: "ELEVENLABS_STT_API_KEY",
+    docsUrl: "https://elevenlabs.io/app/settings/api-keys",
+    keyPlaceholder: "Your API key",
+  },
+  {
+    value: "assemblyai",
+    label: "AssemblyAI",
+    hint: "Streaming, 307ms, $0.15/hr, 333hr free",
+    envVar: "ASSEMBLYAI_API_KEY",
+    docsUrl: "https://www.assemblyai.com/app",
+    keyPlaceholder: "Your API key",
+  },
+  {
+    value: "gladia",
+    label: "Gladia",
+    hint: "Streaming, Opus native, 270ms, 100+ langs",
+    envVar: "GLADIA_API_KEY",
+    docsUrl: "https://app.gladia.io",
+    keyPlaceholder: "Your API key",
+  },
+] as const;
+```
+
+**Step 2: Rewrite `stepSttSetup()` to mirror `stepTtsSetup()`**
+
+Replace the entire `stepSttSetup` function (lines 341-390) with a multi-provider version:
+
+```typescript
+async function stepSttSetup(prompter: WizardPrompter): Promise<void> {
+  const currentProvider = getEnvValue("STT_PROVIDER") ?? "deepgram";
+
+  const selectedProvider = String(
+    await prompter.select({
+      message: "Which STT provider do you want to use?",
+      options: STT_PROVIDERS_INFO.map((p) => ({
+        value: p.value,
+        label: p.label,
+        hint: p.hint,
+      })),
+      initialValue: currentProvider,
+    }),
+  );
+
+  const info = STT_PROVIDERS_INFO.find((p) => p.value === selectedProvider)!;
+  const existingKey = getEnvValue(info.envVar);
+
+  if (existingKey) {
+    const update = await prompter.confirm({
+      message: `${info.label} API key already set (${existingKey.slice(0, 8)}...). Update it?`,
+      initialValue: false,
+    });
+    if (!update) {
+      saveToEnv({ STT_PROVIDER: selectedProvider });
+      await prompter.note(`✅ STT provider set to ${info.label}.`, "STT ready");
+      return;
+    }
+  } else {
+    await prompter.note(
+      [
+        `ESP32 Voice will use ${info.label} for Speech-to-Text (STT).`,
+        `You need a ${info.label} API key.`,
+        "",
+        `${formatDocsLink(info.docsUrl, `Get ${info.label} API key →`)}`,
+      ].join("\n"),
+      `STT Setup — ${info.label}`,
+    );
+  }
+
+  const key = String(
+    await prompter.text({
+      message: `${info.label} API key`,
+      placeholder: info.keyPlaceholder,
+      validate: (v) => {
+        if (!String(v ?? "").trim()) return "Required";
+        return undefined;
+      },
+    }),
+  ).trim();
+
+  const model = String(
+    await prompter.text({
+      message: "Model (optional, press Enter for default)",
+      placeholder: "default",
+      initialValue: getEnvValue("STT_MODEL") ?? "",
+    }),
+  ).trim();
+
+  const toSave: Record<string, string> = {
+    STT_PROVIDER: selectedProvider,
+    [info.envVar]: key,
+  };
+  if (model) toSave.STT_MODEL = model;
+  saveToEnv(toSave);
+
+  await prompter.note(`✅ ${info.label} API key saved.`, "STT ready");
+}
+```
+
+**Step 3: Update `getStatus()` to show dynamic STT provider**
+
+In `getStatus()` (line ~582-604), replace the hardcoded Deepgram status:
+
+```typescript
+// OLD:
+const hasSTT = Boolean(getEnvValue("DEEPGRAM_API_KEY"));
+// ...
+lines.push(`  STT (Deepgram):   ${hasSTT ? "✅ configured" : "❌ missing key"}`);
+
+// NEW:
+const sttProvider = getEnvValue("STT_PROVIDER") ?? "deepgram";
+const sttMeta = STT_PROVIDERS_INFO.find((p) => p.value === sttProvider) ?? STT_PROVIDERS_INFO[0];
+const hasSTT = Boolean(getEnvValue(sttMeta.envVar));
+// ...
+lines.push(`  STT (${sttMeta.label}):   ${hasSTT ? "✅ configured" : "❌ missing key"}`);
+```
+
+**Step 4: Update the "Done" summary to show dynamic STT provider**
+
+In the final summary note (line ~694), replace:
+
+```typescript
+// OLD:
+`  STT          : Deepgram ${getEnvValue("DEEPGRAM_MODEL") ?? "(default model)"}`,
+
+// NEW:
+`  STT          : ${(STT_PROVIDERS_INFO.find((p) => p.value === (getEnvValue("STT_PROVIDER") ?? "deepgram")) ?? STT_PROVIDERS_INFO[0]).label} ${getEnvValue("STT_MODEL") ?? "(default model)"}`,
+```
+
+**Step 5: Update the intro note step numbering**
+
+In the intro note (line ~614), change:
+```typescript
+// OLD:
+"  2. Set up Speech-to-Text (Deepgram)",
+// NEW:
+"  2. Set up Speech-to-Text (STT provider)",
+```
+
+**Step 6: Verify TypeScript compiles**
+
+Run: `npx tsc --noEmit`
+Expected: No errors
+
+**Step 7: Commit**
+
+```bash
+git add extensions/esp32-voice/src/onboarding.ts
+git commit -m "feat(esp32-voice): multi-provider STT selection in onboarding wizard"
+```
+
+---
+
+## Task 9: Unit Tests
 
 **Files:**
 - Create: `extensions/esp32-voice/src/stt/stt-providers.test.ts`
@@ -1227,7 +1412,7 @@ git commit -m "test(esp32-voice): add unit tests for all 4 new STT providers"
 
 ---
 
-## Task 9: Live Integration Tests
+## Task 10: Live Integration Tests
 
 **Files:**
 - Create: `extensions/esp32-voice/src/stt/stt-providers.live.test.ts`
@@ -1305,7 +1490,7 @@ git commit -m "test(esp32-voice): add live integration tests for STT providers"
 
 ---
 
-## Task 10: Final Verification
+## Task 11: Final Verification
 
 **Step 1: Run full unit test suite**
 
