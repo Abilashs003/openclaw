@@ -76,16 +76,27 @@ export function resolveEsp32VoiceAccount(params: {
     sttApiKey = process.env.DEEPGRAM_API_KEY?.trim() || undefined;
   }
 
-  // ── Resolve TTS API key ──
+  // ── Resolve TTS API key (provider-aware) ──
+  const ttsProvider = merged.ttsProvider ?? process.env.TTS_PROVIDER ?? "elevenlabs";
+  const ttsEnvMap: Record<string, { apiKey: string; voiceId?: string }> = {
+    "elevenlabs":  { apiKey: "ELEVENLABS_API_KEY",   voiceId: "ELEVENLABS_VOICE_ID" },
+    "rime":        { apiKey: "RIME_API_KEY",          voiceId: "RIME_VOICE_ID" },
+    "inworld":     { apiKey: "INWORLD_API_KEY",       voiceId: "INWORLD_VOICE_ID" },
+    "cartesia":    { apiKey: "CARTESIA_API_KEY",      voiceId: "CARTESIA_VOICE_ID" },
+    "smallest-ai": { apiKey: "SMALLEST_AI_API_KEY",   voiceId: "SMALLEST_AI_VOICE_ID" },
+    "groq-playai": { apiKey: "GROQ_API_KEY",          voiceId: "GROQ_VOICE_ID" },
+  };
+  const ttsEnv = ttsEnvMap[ttsProvider] ?? ttsEnvMap["elevenlabs"];
+
   let ttsApiKey = merged.ttsApiKey?.trim() || undefined;
   if (!ttsApiKey) {
-    ttsApiKey = process.env.ELEVENLABS_API_KEY?.trim() || process.env.XI_API_KEY?.trim() || undefined;
+    ttsApiKey = process.env[ttsEnv.apiKey]?.trim() || process.env.XI_API_KEY?.trim() || undefined;
   }
 
-  // ── Resolve TTS voice ID ──
+  // ── Resolve TTS voice ID (provider-aware) ──
   let ttsVoiceId = merged.ttsVoiceId?.trim() || undefined;
-  if (!ttsVoiceId) {
-    ttsVoiceId = process.env.ELEVENLABS_VOICE_ID?.trim() || undefined;
+  if (!ttsVoiceId && ttsEnv.voiceId) {
+    ttsVoiceId = process.env[ttsEnv.voiceId]?.trim() || undefined;
   }
 
   return {
@@ -98,7 +109,7 @@ export function resolveEsp32VoiceAccount(params: {
     sttProvider: merged.sttProvider ?? "deepgram",
     sttApiKey,
     sttModel: merged.sttModel,
-    ttsProvider: merged.ttsProvider ?? "elevenlabs",
+    ttsProvider,
     ttsApiKey,
     ttsVoiceId,
     ttsModel: merged.ttsModel,

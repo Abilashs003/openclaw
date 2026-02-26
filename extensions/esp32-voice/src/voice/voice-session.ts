@@ -20,6 +20,29 @@ import type { TtsProvider } from "../tts/tts-provider.js";
 import { deviceOtpManager } from "../device/device-otp.js";
 import { SileroVad } from "../vad/silero-vad.js";
 
+// ── TTS provider → env var mapping ───────────────────────────────
+// Maps each TTS provider ID to the environment variables it reads for
+// API key, voice ID, and model. Used by both auto-hello and hello-message
+// config resolution paths so the correct credentials are picked up.
+const TTS_ENV_MAP: Record<string, { apiKey: string; voiceId?: string; model?: string }> = {
+  "elevenlabs":  { apiKey: "ELEVENLABS_API_KEY",   voiceId: "ELEVENLABS_VOICE_ID",   model: "ELEVENLABS_MODEL_ID" },
+  "rime":        { apiKey: "RIME_API_KEY",          voiceId: "RIME_VOICE_ID" },
+  "inworld":     { apiKey: "INWORLD_API_KEY",       voiceId: "INWORLD_VOICE_ID" },
+  "cartesia":    { apiKey: "CARTESIA_API_KEY",      voiceId: "CARTESIA_VOICE_ID" },
+  "smallest-ai": { apiKey: "SMALLEST_AI_API_KEY",   voiceId: "SMALLEST_AI_VOICE_ID" },
+  "groq-playai": { apiKey: "GROQ_API_KEY",          voiceId: "GROQ_VOICE_ID" },
+};
+
+/** Resolve TTS env vars for a given provider ID. */
+function resolveTtsEnv(providerId: string): { apiKey: string; voiceId?: string; model?: string } {
+  const env = TTS_ENV_MAP[providerId] ?? TTS_ENV_MAP["elevenlabs"];
+  return {
+    apiKey:  process.env[env.apiKey] ?? "",
+    voiceId: env.voiceId ? process.env[env.voiceId] : undefined,
+    model:   env.model   ? process.env[env.model]   : undefined,
+  };
+}
+
 // ── Opus Encoder (lazy-loaded) ────────────────────────────────
 // opusscript is a pure JS/WASM Opus encoder — no native binary needed.
 // It converts PCM audio from TTS into Opus frames that the ESP32 can decode.
@@ -275,16 +298,18 @@ export class VoiceSession {
 
       const gatewayUrl   = process.env.OPENCLAW_GATEWAY_URL   ?? "ws://127.0.0.1:18789";
       const gatewayToken = process.env.OPENCLAW_GATEWAY_TOKEN ?? "";
+      const autoTtsProvider = process.env.TTS_PROVIDER ?? "elevenlabs";
+      const autoTtsEnv = resolveTtsEnv(autoTtsProvider);
       this.cfg = {
         openclawUrl:   gatewayUrl,
         openclawToken: gatewayToken,
         sttProvider: "deepgram",
         sttApiKey:   process.env.DEEPGRAM_API_KEY ?? "",
         sttModel:    process.env.DEEPGRAM_MODEL,
-        ttsProvider: "elevenlabs",
-        ttsApiKey:   process.env.ELEVENLABS_API_KEY ?? "",
-        ttsVoiceId:  process.env.ELEVENLABS_VOICE_ID,
-        ttsModel:    process.env.ELEVENLABS_MODEL_ID,
+        ttsProvider: autoTtsProvider,
+        ttsApiKey:   autoTtsEnv.apiKey,
+        ttsVoiceId:  autoTtsEnv.voiceId,
+        ttsModel:    autoTtsEnv.model,
         language:    "en",
       };
 
@@ -446,16 +471,18 @@ export class VoiceSession {
       this.log("info", `No openclaw URL in hello, falling back to ${resolvedOpenclawUrl}`);
     }
 
+    const helloTtsProvider = ttsConfig?.provider ?? process.env.TTS_PROVIDER ?? "elevenlabs";
+    const helloTtsEnv = resolveTtsEnv(helloTtsProvider);
     this.cfg = {
       openclawUrl: resolvedOpenclawUrl,
       openclawToken: resolvedOpenclawToken,
       sttProvider: sttConfig?.provider ?? "deepgram",
       sttApiKey: sttConfig?.apiKey ?? process.env.DEEPGRAM_API_KEY ?? "",
       sttModel: sttConfig?.model ?? process.env.DEEPGRAM_MODEL,
-      ttsProvider: ttsConfig?.provider ?? "elevenlabs",
-      ttsApiKey: ttsConfig?.apiKey ?? process.env.ELEVENLABS_API_KEY ?? "",
-      ttsVoiceId: ttsConfig?.voiceId ?? process.env.ELEVENLABS_VOICE_ID,
-      ttsModel: ttsConfig?.model ?? process.env.ELEVENLABS_MODEL_ID,
+      ttsProvider: helloTtsProvider,
+      ttsApiKey: ttsConfig?.apiKey ?? helloTtsEnv.apiKey,
+      ttsVoiceId: ttsConfig?.voiceId ?? helloTtsEnv.voiceId,
+      ttsModel: ttsConfig?.model ?? helloTtsEnv.model,
       language: (msg.language as string) ?? "en",
     };
 
@@ -824,6 +851,7 @@ export class VoiceSession {
       model: this.cfg.ttsModel,
       language: this.cfg.language,
     });
+    this.log("info", `TTS using provider: ${this.cfg.ttsProvider} (voice: ${this.cfg.ttsVoiceId ?? "default"}, model: ${this.cfg.ttsModel ?? "default"})`);
 
     // Collect PCM audio, Opus-encode if ESP32, send as binary frames
     this.tts.onAudio = async (pcmChunk: Buffer) => {

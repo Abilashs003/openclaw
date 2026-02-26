@@ -22,6 +22,11 @@ import { VoiceSession } from "./voice-session.js";
 // Import providers to trigger auto-registration
 import "../stt/deepgram.js";
 import "../tts/elevenlabs.js";
+import "../tts/rime.js";
+import "../tts/inworld.js";
+import "../tts/cartesia.js";
+import "../tts/smallest-ai.js";
+import "../tts/groq-playai.js";
 
 /** Default port for the standalone voice WebSocket server. */
 const DEFAULT_VOICE_PORT = parseInt(process.env.ESP32_VOICE_PORT || "8765", 10);
@@ -291,7 +296,13 @@ export function startStandaloneVoiceServer(port?: number): {
           type: "websocket",
           hint: "Connect via WebSocket to this server for voice streaming",
           sttConfigured: Boolean(process.env.DEEPGRAM_API_KEY),
-          ttsConfigured: Boolean(process.env.ELEVENLABS_API_KEY || process.env.XI_API_KEY),
+          ttsProvider: process.env.TTS_PROVIDER ?? "elevenlabs",
+          ttsConfigured: Boolean(
+            process.env.ELEVENLABS_API_KEY || process.env.XI_API_KEY ||
+            process.env.RIME_API_KEY || process.env.CARTESIA_API_KEY ||
+            process.env.INWORLD_API_KEY || process.env.SMALLEST_AI_API_KEY ||
+            process.env.GROQ_API_KEY
+          ),
         }),
       );
       return;
