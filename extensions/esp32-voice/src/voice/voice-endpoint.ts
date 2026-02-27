@@ -21,6 +21,10 @@ import { VoiceSession } from "./voice-session.js";
 
 // Import providers to trigger auto-registration
 import "../stt/deepgram.js";
+import "../stt/soniox.js";
+import "../stt/elevenlabs-stt.js";
+import "../stt/assemblyai.js";
+import "../stt/gladia.js";
 import "../tts/elevenlabs.js";
 import "../tts/rime.js";
 import "../tts/inworld.js";
@@ -295,7 +299,12 @@ export function startStandaloneVoiceServer(port?: number): {
           service: "esp32-voice",
           type: "websocket",
           hint: "Connect via WebSocket to this server for voice streaming",
-          sttConfigured: Boolean(process.env.DEEPGRAM_API_KEY),
+          sttProvider: process.env.STT_PROVIDER ?? "deepgram",
+          sttConfigured: Boolean(
+            process.env.DEEPGRAM_API_KEY || process.env.SONIOX_API_KEY ||
+            process.env.ELEVENLABS_STT_API_KEY || process.env.ASSEMBLYAI_API_KEY ||
+            process.env.GLADIA_API_KEY
+          ),
           ttsProvider: process.env.TTS_PROVIDER ?? "elevenlabs",
           ttsConfigured: Boolean(
             process.env.ELEVENLABS_API_KEY || process.env.XI_API_KEY ||
