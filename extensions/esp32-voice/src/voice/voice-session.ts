@@ -33,6 +33,23 @@ const TTS_ENV_MAP: Record<string, { apiKey: string; voiceId?: string; model?: st
   "groq-playai": { apiKey: "GROQ_API_KEY",          voiceId: "GROQ_VOICE_ID" },
 };
 
+// ── STT provider → env var mapping ───────────────────────────────
+const STT_ENV_MAP: Record<string, { apiKey: string }> = {
+  "deepgram":       { apiKey: "DEEPGRAM_API_KEY" },
+  "soniox":         { apiKey: "SONIOX_API_KEY" },
+  "elevenlabs-stt": { apiKey: "ELEVENLABS_STT_API_KEY" },
+  "assemblyai":     { apiKey: "ASSEMBLYAI_API_KEY" },
+  "gladia":         { apiKey: "GLADIA_API_KEY" },
+};
+
+/** Resolve STT env vars for a given provider ID. */
+function resolveSttEnv(providerId: string): { apiKey: string } {
+  const env = STT_ENV_MAP[providerId] ?? STT_ENV_MAP["deepgram"];
+  return {
+    apiKey: process.env[env.apiKey] ?? "",
+  };
+}
+
 /** Resolve TTS env vars for a given provider ID. */
 function resolveTtsEnv(providerId: string): { apiKey: string; voiceId?: string; model?: string } {
   const env = TTS_ENV_MAP[providerId] ?? TTS_ENV_MAP["elevenlabs"];
@@ -300,12 +317,14 @@ export class VoiceSession {
       const gatewayToken = process.env.OPENCLAW_GATEWAY_TOKEN ?? "";
       const autoTtsProvider = process.env.TTS_PROVIDER ?? "elevenlabs";
       const autoTtsEnv = resolveTtsEnv(autoTtsProvider);
+      const autoSttProvider = process.env.STT_PROVIDER ?? "deepgram";
+      const autoSttEnv = resolveSttEnv(autoSttProvider);
       this.cfg = {
         openclawUrl:   gatewayUrl,
         openclawToken: gatewayToken,
-        sttProvider: "deepgram",
-        sttApiKey:   process.env.DEEPGRAM_API_KEY ?? "",
-        sttModel:    process.env.DEEPGRAM_MODEL,
+        sttProvider: autoSttProvider,
+        sttApiKey:   autoSttEnv.apiKey,
+        sttModel:    process.env.STT_MODEL,
         ttsProvider: autoTtsProvider,
         ttsApiKey:   autoTtsEnv.apiKey,
         ttsVoiceId:  autoTtsEnv.voiceId,
@@ -476,9 +495,9 @@ export class VoiceSession {
     this.cfg = {
       openclawUrl: resolvedOpenclawUrl,
       openclawToken: resolvedOpenclawToken,
-      sttProvider: sttConfig?.provider ?? "deepgram",
-      sttApiKey: sttConfig?.apiKey ?? process.env.DEEPGRAM_API_KEY ?? "",
-      sttModel: sttConfig?.model ?? process.env.DEEPGRAM_MODEL,
+      sttProvider: sttConfig?.provider ?? process.env.STT_PROVIDER ?? "deepgram",
+      sttApiKey: sttConfig?.apiKey ?? resolveSttEnv(sttConfig?.provider ?? process.env.STT_PROVIDER ?? "deepgram").apiKey,
+      sttModel: sttConfig?.model ?? process.env.STT_MODEL,
       ttsProvider: helloTtsProvider,
       ttsApiKey: ttsConfig?.apiKey ?? helloTtsEnv.apiKey,
       ttsVoiceId: ttsConfig?.voiceId ?? helloTtsEnv.voiceId,
