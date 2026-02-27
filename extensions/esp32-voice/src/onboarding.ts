@@ -336,39 +336,97 @@ function extractTokenFromInput(raw: string): string | null {
   return null;
 }
 
-// ── Step 2 — STT Setup (Deepgram) ─────────────────────────────────────────────
+// ── Step 2 — STT Setup (multi-provider) ───────────────────────────────────────
+
+const STT_PROVIDERS_INFO = [
+  {
+    value: "deepgram",
+    label: "Deepgram",
+    hint: "Streaming, Opus native, ~150ms, $0.46/hr",
+    envVar: "DEEPGRAM_API_KEY",
+    docsUrl: "https://console.deepgram.com",
+    keyPlaceholder: "dg-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  },
+  {
+    value: "soniox",
+    label: "Soniox",
+    hint: "Streaming, <200ms, cheapest ($0.12/hr)",
+    envVar: "SONIOX_API_KEY",
+    docsUrl: "https://console.soniox.com",
+    keyPlaceholder: "Your API key",
+  },
+  {
+    value: "elevenlabs-stt",
+    label: "ElevenLabs STT",
+    hint: "Streaming, ~150ms, 90+ languages",
+    envVar: "ELEVENLABS_STT_API_KEY",
+    docsUrl: "https://elevenlabs.io/app/settings/api-keys",
+    keyPlaceholder: "Your API key",
+  },
+  {
+    value: "assemblyai",
+    label: "AssemblyAI",
+    hint: "Streaming, 307ms, $0.15/hr, 333hr free",
+    envVar: "ASSEMBLYAI_API_KEY",
+    docsUrl: "https://www.assemblyai.com/app",
+    keyPlaceholder: "Your API key",
+  },
+  {
+    value: "gladia",
+    label: "Gladia",
+    hint: "Streaming, Opus native, 270ms, 100+ langs",
+    envVar: "GLADIA_API_KEY",
+    docsUrl: "https://app.gladia.io",
+    keyPlaceholder: "Your API key",
+  },
+] as const;
 
 async function stepSttSetup(prompter: WizardPrompter): Promise<void> {
-  const existing = getEnvValue("DEEPGRAM_API_KEY");
+  const currentProvider = getEnvValue("STT_PROVIDER") ?? "deepgram";
 
-  if (existing) {
+  const selectedProvider = String(
+    await prompter.select({
+      message: "Which STT provider do you want to use?",
+      options: STT_PROVIDERS_INFO.map((p) => ({
+        value: p.value,
+        label: p.label,
+        hint: p.hint,
+      })),
+      initialValue: currentProvider,
+    }),
+  );
+
+  const info = STT_PROVIDERS_INFO.find((p) => p.value === selectedProvider)!;
+  const existingKey = getEnvValue(info.envVar);
+
+  if (existingKey) {
     const update = await prompter.confirm({
-      message: `Deepgram API key already set (${existing.slice(0, 8)}...). Update it?`,
+      message: `${info.label} API key already set (${existingKey.slice(0, 8)}...). Update it?`,
       initialValue: false,
     });
-    if (!update) return;
+    if (!update) {
+      saveToEnv({ STT_PROVIDER: selectedProvider });
+      await prompter.note(`✅ STT provider set to ${info.label}.`, "STT ready");
+      return;
+    }
   } else {
     await prompter.note(
       [
-        "ESP32 Voice uses Deepgram for Speech-to-Text (STT).",
-        "You need a free Deepgram API key.",
+        `ESP32 Voice will use ${info.label} for Speech-to-Text (STT).`,
+        `You need a ${info.label} API key.`,
         "",
-        `${formatDocsLink("https://console.deepgram.com", "Get Deepgram API key →")}`,
-        "",
-        "Sign up → Create API key → Copy it below.",
+        `${formatDocsLink(info.docsUrl, `Get ${info.label} API key →`)}`,
       ].join("\n"),
-      "STT Setup — Deepgram",
+      `STT Setup — ${info.label}`,
     );
   }
 
   const key = String(
     await prompter.text({
-      message: "Deepgram API key",
-      placeholder: "dg-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      message: `${info.label} API key`,
+      placeholder: info.keyPlaceholder,
       validate: (v) => {
-        const k = String(v ?? "").trim();
-        if (!k) return "Required";
-        if (!k.startsWith("dg-") && k.length < 20) return "Doesn't look like a Deepgram key (should start with dg-)";
+        if (!String(v ?? "").trim()) return "Required";
         return undefined;
       },
     }),
@@ -376,17 +434,20 @@ async function stepSttSetup(prompter: WizardPrompter): Promise<void> {
 
   const model = String(
     await prompter.text({
-      message: "Deepgram model (optional, press Enter for default)",
-      placeholder: "nova-3",
-      initialValue: getEnvValue("DEEPGRAM_MODEL") ?? "",
+      message: "Model (optional, press Enter for default)",
+      placeholder: "default",
+      initialValue: getEnvValue("STT_MODEL") ?? "",
     }),
   ).trim();
 
-  const toSave: Record<string, string> = { DEEPGRAM_API_KEY: key };
-  if (model) toSave.DEEPGRAM_MODEL = model;
+  const toSave: Record<string, string> = {
+    STT_PROVIDER: selectedProvider,
+    [info.envVar]: key,
+  };
+  if (model) toSave.STT_MODEL = model;
   saveToEnv(toSave);
 
-  await prompter.note("✅ Deepgram API key saved.", "STT ready");
+  await prompter.note(`✅ ${info.label} API key saved.`, "STT ready");
 }
 
 // ── Step 3 — TTS Setup (multi-provider) ───────────────────────────────────────
@@ -581,7 +642,9 @@ export const esp32VoiceOnboardingAdapter: ChannelOnboardingAdapter = {
 
   getStatus: async ({ cfg }) => {
     const hasPair = Boolean(getEnvValue("CHEEKO_PAIR"));
-    const hasSTT = Boolean(getEnvValue("DEEPGRAM_API_KEY"));
+    const sttProvider = getEnvValue("STT_PROVIDER") ?? "deepgram";
+    const sttMeta = STT_PROVIDERS_INFO.find((p) => p.value === sttProvider) ?? STT_PROVIDERS_INFO[0];
+    const hasSTT = Boolean(getEnvValue(sttMeta.envVar));
     const ttsProvider = getEnvValue("TTS_PROVIDER") ?? "elevenlabs";
     const ttsMeta = TTS_PROVIDERS_INFO.find((p) => p.value === ttsProvider) ?? TTS_PROVIDERS_INFO[0];
     const hasTTS = Boolean(getEnvValue(ttsMeta.envVar));
@@ -591,7 +654,7 @@ export const esp32VoiceOnboardingAdapter: ChannelOnboardingAdapter = {
     const lines: string[] = [];
     lines.push(`ESP32 Voice: ${overallStatus}`);
     lines.push(`  Cheeko dashboard: ${hasPair ? "✅ connected" : "❌ not connected"}`);
-    lines.push(`  STT (Deepgram):   ${hasSTT ? "✅ configured" : "❌ missing key"}`);
+    lines.push(`  STT (${sttMeta.label}):   ${hasSTT ? "✅ configured" : "❌ missing key"}`);
     lines.push(`  TTS (${ttsMeta.label}): ${hasTTS ? "✅ configured" : "❌ missing key"}`);
 
     return {
@@ -611,7 +674,7 @@ export const esp32VoiceOnboardingAdapter: ChannelOnboardingAdapter = {
         "",
         "Steps:",
         "  1. Connect to Cheeko dashboard",
-        "  2. Set up Speech-to-Text (Deepgram)",
+        "  2. Set up Speech-to-Text (STT provider)",
         "  3. Set up Text-to-Speech (TTS provider)",
         "  4. Add your device",
         "",
@@ -691,7 +754,7 @@ export const esp32VoiceOnboardingAdapter: ChannelOnboardingAdapter = {
         "Your configuration:",
         `  Voice server : ws://${localIp}:${VOICE_PORT}/`,
         `  Dashboard    : ${DASHBOARD_URL}`,
-        `  STT          : Deepgram ${getEnvValue("DEEPGRAM_MODEL") ?? "(default model)"}`,
+        `  STT          : ${(STT_PROVIDERS_INFO.find((p) => p.value === (getEnvValue("STT_PROVIDER") ?? "deepgram")) ?? STT_PROVIDERS_INFO[0]).label} ${getEnvValue("STT_MODEL") ?? "(default model)"}`,
         `  TTS          : ${(TTS_PROVIDERS_INFO.find((p) => p.value === (getEnvValue("TTS_PROVIDER") ?? "elevenlabs")) ?? TTS_PROVIDERS_INFO[0]).label} (${getEnvValue((TTS_PROVIDERS_INFO.find((p) => p.value === (getEnvValue("TTS_PROVIDER") ?? "elevenlabs")) ?? TTS_PROVIDERS_INFO[0]).envVar.replace("_API_KEY", "") + "_VOICE_ID") ?? "default voice"})`,
         "",
         "Start the voice server:",
