@@ -468,8 +468,8 @@ const TTS_PROVIDERS_INFO = [
     hint: "Streaming, native PCM, low latency",
     envVar: "RIME_API_KEY",
     docsUrl: "https://rime.ai/docs",
-    defaultVoice: "arcas",
-    voiceHint: "arcas",
+    defaultVoice: "luna",
+    voiceHint: "luna",
   },
   {
     value: "inworld",
@@ -477,8 +477,8 @@ const TTS_PROVIDERS_INFO = [
     hint: "Streaming, <120ms, best latency",
     envVar: "INWORLD_API_KEY",
     docsUrl: "https://inworld.ai/tts-api",
-    defaultVoice: "inworld.neutral",
-    voiceHint: "inworld.neutral",
+    defaultVoice: "Ashley",
+    voiceHint: "Ashley",
   },
   {
     value: "cartesia",

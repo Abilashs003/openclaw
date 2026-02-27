@@ -156,8 +156,8 @@ describe("RimeTtsProvider", () => {
     provider = new RimeTtsProvider({ apiKey: API_KEY });
   });
 
-  it("defaults: voice=cove, model=mistv2", () => {
-    expect((provider as any).voiceId).toBe("cove");
+  it("defaults: voice=luna, model=mistv2", () => {
+    expect((provider as any).voiceId).toBe("luna");
     expect((provider as any).modelId).toBe("mistv2");
   });
 
@@ -173,7 +173,7 @@ describe("RimeTtsProvider", () => {
     await connecting;
 
     expect(MockWs.last!.url).toContain("wss://users-ws.rime.ai/ws");
-    expect(MockWs.last!.url).toContain("speaker=cove");
+    expect(MockWs.last!.url).toContain("speaker=luna");
     expect(MockWs.last!.url).toContain("audioFormat=pcm");
     expect((MockWs.last!.options as any).headers?.Authorization).toBe(
       `Bearer ${API_KEY}`,

@@ -33,6 +33,7 @@ export class DeepgramSttProvider implements SttProvider {
   private lastPartialTranscript = "";  // fallback when CloseStream flushes with empty final
   private finalizeResolve: ((value: string) => void) | null = null;
   private finalizePromise: Promise<string> | null = null;
+  private finalizeTimers: ReturnType<typeof setTimeout>[] = [];
 
   constructor(config: SttProviderConfig) {
     this.apiKey = config.apiKey;
@@ -146,6 +147,7 @@ export class DeepgramSttProvider implements SttProvider {
           this.ws.send(JSON.stringify({ type: "CloseStream" }));
         }
       }, CLOSE_STREAM_DELAY_MS);
+      this.finalizeTimers.push(closeTimer);
 
       const timeoutPromise = new Promise<string>((resolve) => {
         const timer = setTimeout(() => {
@@ -158,6 +160,7 @@ export class DeepgramSttProvider implements SttProvider {
           }
           resolve(fallback);
         }, TOTAL_TIMEOUT_MS);
+        this.finalizeTimers.push(timer);
         // Clear timeout if finalizePromise resolves first
         this.finalizePromise!.then(() => clearTimeout(timer));
       });
@@ -172,6 +175,8 @@ export class DeepgramSttProvider implements SttProvider {
   }
 
   async close(): Promise<void> {
+    for (const t of this.finalizeTimers) clearTimeout(t);
+    this.finalizeTimers = [];
     if (this.ws) {
       try {
         // Use terminate() if still connecting — close() throws on CONNECTING state

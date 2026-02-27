@@ -33,6 +33,7 @@ export class ElevenLabsSttProvider implements SttProvider {
   private lastPartialTranscript = "";
   private finalizeResolve: ((value: string) => void) | null = null;
   private finalizePromise: Promise<string> | null = null;
+  private finalizeTimers: ReturnType<typeof setTimeout>[] = [];
 
   constructor(config: SttProviderConfig) {
     this.apiKey = config.apiKey;
@@ -152,6 +153,7 @@ export class ElevenLabsSttProvider implements SttProvider {
           }
           resolve(fallback);
         }, TOTAL_TIMEOUT_MS);
+        this.finalizeTimers.push(timer);
         // Clear timeout if committed_transcript resolves first
         this.finalizePromise!.then(() => clearTimeout(timer));
       });
@@ -163,6 +165,8 @@ export class ElevenLabsSttProvider implements SttProvider {
   }
 
   async close(): Promise<void> {
+    for (const t of this.finalizeTimers) clearTimeout(t);
+    this.finalizeTimers = [];
     if (this.ws) {
       try {
         if (this.ws.readyState === this.ws.CONNECTING) {

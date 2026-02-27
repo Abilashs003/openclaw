@@ -35,6 +35,7 @@ export class AssemblyAiSttProvider implements SttProvider {
   private lastPartialTranscript = "";
   private finalizeResolve: ((value: string) => void) | null = null;
   private finalizePromise: Promise<string> | null = null;
+  private finalizeTimers: ReturnType<typeof setTimeout>[] = [];
 
   constructor(config: SttProviderConfig) {
     this.apiKey = config.apiKey;
@@ -164,6 +165,7 @@ export class AssemblyAiSttProvider implements SttProvider {
           }
           resolve(fallback);
         }, TOTAL_TIMEOUT_MS);
+        this.finalizeTimers.push(timer);
         this.finalizePromise!.then(() => clearTimeout(timer));
       });
 
@@ -174,6 +176,8 @@ export class AssemblyAiSttProvider implements SttProvider {
   }
 
   async close(): Promise<void> {
+    for (const t of this.finalizeTimers) clearTimeout(t);
+    this.finalizeTimers = [];
     if (this.ws) {
       try {
         if (this.ws.readyState === this.ws.CONNECTING) {

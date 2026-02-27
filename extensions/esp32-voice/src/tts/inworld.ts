@@ -149,11 +149,10 @@ export class InworldTtsProvider implements TtsProvider {
           }));
         } catch { /* ignore */ }
         try { this.ws.close(); } catch { /* ignore */ }
-        this.ws = null;
       } else if (this.ws.readyState === this.ws.CONNECTING) {
         try { this.ws.terminate(); } catch { /* ignore */ }
-        this.ws = null;
       }
+      this.ws = null;
     }
   }
 
