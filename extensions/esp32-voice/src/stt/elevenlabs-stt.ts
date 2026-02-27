@@ -129,9 +129,19 @@ export class ElevenLabsSttProvider implements SttProvider {
     }
 
     if (this.finalizePromise) {
+      // Send commit signal — empty audio chunk with commit:true triggers committed_transcript
+      if (this.ws?.readyState === WebSocket.OPEN) {
+        this.ws.send(JSON.stringify({
+          message_type: "input_audio_chunk",
+          audio_base_64: "",
+          commit: true,
+          sample_rate: 16000,
+        }));
+      }
+
       const TOTAL_TIMEOUT_MS = 6000;
       const timeoutPromise = new Promise<string>((resolve) => {
-        setTimeout(() => {
+        const timer = setTimeout(() => {
           const fallback = this.finalTranscript || this.lastPartialTranscript;
           console.warn(`[elevenlabs-stt] Timeout waiting for final transcript (using: "${fallback}")`);
           if (this.finalizeResolve) {
@@ -140,6 +150,8 @@ export class ElevenLabsSttProvider implements SttProvider {
           }
           resolve(fallback);
         }, TOTAL_TIMEOUT_MS);
+        // Clear timeout if committed_transcript resolves first
+        this.finalizePromise!.then(() => clearTimeout(timer));
       });
 
       return Promise.race([this.finalizePromise, timeoutPromise]);
