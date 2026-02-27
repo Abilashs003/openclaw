@@ -177,18 +177,27 @@ export class DeepgramSttProvider implements SttProvider {
   async close(): Promise<void> {
     for (const t of this.finalizeTimers) clearTimeout(t);
     this.finalizeTimers = [];
+    if (this.finalizeResolve) {
+      this.finalizeResolve(this.finalTranscript || this.lastPartialTranscript);
+      this.finalizeResolve = null;
+    }
     if (this.ws) {
+      const ws = this.ws;
+      this.ws = null;
+      // Remove listeners before terminating to prevent stale error/close
+      // handlers from firing (e.g. reject() on connect promise)
+      ws.removeAllListeners();
+      // Re-add no-op error handler — Node throws if 'error' is emitted with no listener
+      ws.on("error", () => {});
       try {
-        // Use terminate() if still connecting — close() throws on CONNECTING state
-        if (this.ws.readyState === this.ws.CONNECTING) {
-          this.ws.terminate();
+        if (ws.readyState === ws.CONNECTING) {
+          ws.terminate();
         } else {
-          this.ws.close();
+          ws.close();
         }
       } catch {
         // Ignore close errors
       }
-      this.ws = null;
     }
   }
 

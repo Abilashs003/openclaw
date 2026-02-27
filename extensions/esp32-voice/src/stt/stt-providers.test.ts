@@ -29,6 +29,7 @@ const { MockWs } = vi.hoisted(() => {
 
     off(_event: string, _fn: (...a: unknown[]) => void) { /* no-op */ }
     removeListener(_event: string, _fn: (...a: unknown[]) => void) { /* no-op */ }
+    removeAllListeners() { this._h.clear(); }
 
     send(data: string | Buffer) {
       this.sent.push(data);

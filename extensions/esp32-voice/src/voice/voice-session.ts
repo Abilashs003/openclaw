@@ -574,10 +574,11 @@ export class VoiceSession {
   }
 
   private async handleAbort(): Promise<void> {
-    // Cancel processing
+    // Cancel processing — do NOT null the controller here;
+    // the running processUtterance loop checks signal.aborted to exit,
+    // and its finally block handles cleanup.
     if (this.processingAbortController) {
       this.processingAbortController.abort();
-      this.processingAbortController = null;
     }
 
     // Close STT
@@ -697,6 +698,7 @@ export class VoiceSession {
     }
     this.setState("processing_stt");
     this.processingAbortController = new AbortController();
+    const abortSignal = this.processingAbortController.signal;
 
     try {
       // 1. Finalize STT to get final transcript
@@ -763,7 +765,7 @@ export class VoiceSession {
       this.log("info", `OpenClaw response (${responseText.length} chars): ${responseText.slice(0, 120)}`);
 
       // 3. Stream TTS audio back — sentence by sentence
-      await this.streamTtsResponse(responseText);
+      await this.streamTtsResponse(responseText, abortSignal);
     } catch (err) {
       if ((err as Error).name === "AbortError") {
         this.log("info", "Processing cancelled (abort)");
@@ -777,7 +779,7 @@ export class VoiceSession {
     }
   }
 
-  private async streamTtsResponse(responseText: string): Promise<void> {
+  private async streamTtsResponse(responseText: string, abortSignal: AbortSignal): Promise<void> {
     if (!this.cfg) return;
 
     this.setState("streaming_tts");
@@ -805,6 +807,12 @@ export class VoiceSession {
     }
 
     for (let i = 0; i < sentences.length; i++) {
+      // Check if aborted (barge-in: user started speaking during TTS)
+      if (abortSignal.aborted) {
+        this.log("info", `TTS aborted at sentence ${i + 1}/${sentences.length} (barge-in)`);
+        const err = new Error("Aborted"); err.name = "AbortError"; throw err;
+      }
+
       const sentence = sentences[i];
       this.log("info", `TTS sentence ${i + 1}/${sentences.length}: ${sentence.slice(0, 80)}`);
 
@@ -814,7 +822,7 @@ export class VoiceSession {
       }
 
       // Synthesize and stream — awaited so sentences play sequentially
-      await this.synthesizeAndStream(sentence);
+      await this.synthesizeAndStream(sentence, abortSignal);
 
       // Insert silence pause between sentences (not after last)
       if (i < sentences.length - 1) {
@@ -832,7 +840,7 @@ export class VoiceSession {
     this.log("debug", "Audio stream complete");
   }
 
-  private async synthesizeAndStream(text: string): Promise<void> {
+  private async synthesizeAndStream(text: string, abortSignal: AbortSignal): Promise<void> {
     if (!this.cfg) return;
 
     const pcmBuffer: Buffer[] = [];
@@ -877,6 +885,7 @@ export class VoiceSession {
 
       let offset = 0;
       while (offset + OUTPUT_FRAME_BYTES <= totalPcm.length) {
+        if (abortSignal.aborted) return;
         const pcmFrame = totalPcm.subarray(offset, offset + OUTPUT_FRAME_BYTES);
         offset += OUTPUT_FRAME_BYTES;
 
@@ -959,8 +968,10 @@ export class VoiceSession {
 
       this.log("debug", `TTS sent ${frameCount} ${encoder ? "Opus" : "PCM"} frames (paced at ${OUTPUT_FRAME_MS}ms)`);
     } finally {
-      await this.tts.close();
-      this.tts = null;
+      if (this.tts) {
+        await this.tts.close();
+        this.tts = null;
+      }
     }
   }
 
@@ -1171,6 +1182,24 @@ export class VoiceSession {
       const messageHandler = (data: Buffer) => {
         try {
           const event = JSON.parse(data.toString());
+          // Debug: log every event from OpenClaw to understand response structure
+          if (event.type === "event") {
+            const p = event.payload ?? {};
+            this.log("debug", `[openclaw-evt] event=${event.event} state=${p.state ?? "-"} stream=${p.stream ?? "-"} keys=${Object.keys(p).join(",")}`);
+            if (p.data?.text) {
+              this.log("debug", `[openclaw-evt] data.text (${String(p.data.text).length}ch): ${String(p.data.text).slice(0, 1500)}`);
+            }
+            if (p.message?.content) {
+              const c = p.message.content;
+              if (typeof c === "string") {
+                this.log("debug", `[openclaw-evt] content-str (${c.length}ch): ${c.slice(0, 250)}`);
+              } else if (Array.isArray(c)) {
+                for (const block of c as Array<{ type: string; text?: string }>) {
+                  this.log("debug", `[openclaw-evt] block type=${block.type} text=${String(block.text ?? "").slice(0, 150)}`);
+                }
+              }
+            }
+          }
           if (event.type === "event") {
             if (event.event === "agent" && event.payload?.stream === "assistant" && event.payload?.data?.text) {
               const candidate = event.payload.data.text as string;

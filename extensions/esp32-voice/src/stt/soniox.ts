@@ -163,14 +163,17 @@ export class SonioxSttProvider implements SttProvider {
     for (const t of this.finalizeTimers) clearTimeout(t);
     this.finalizeTimers = [];
     if (this.ws) {
+      const ws = this.ws;
+      this.ws = null;
+      ws.removeAllListeners();
+      ws.on("error", () => {});
       try {
-        if (this.ws.readyState === this.ws.CONNECTING) {
-          this.ws.terminate();
+        if (ws.readyState === ws.CONNECTING) {
+          ws.terminate();
         } else {
-          this.ws.close();
+          ws.close();
         }
       } catch { /* ignore */ }
-      this.ws = null;
     }
     this.decoder = null;
   }
