@@ -110,8 +110,9 @@ export class GladiaSttProvider implements SttProvider {
         reject(err);
       });
 
-      this.ws.on("close", () => {
-        console.log("[gladia-stt] Connection closed");
+      this.ws.on("close", (code, reason) => {
+        const reasonStr = reason?.toString() || "";
+        console.log(`[gladia-stt] Connection closed (code=${code}, reason="${reasonStr}")`);
         this.audioQueue = [];
         if (this.finalizeResolve) {
           this.finalizeResolve(this.finalTranscript || this.lastPartialTranscript);
@@ -185,7 +186,13 @@ export class GladiaSttProvider implements SttProvider {
 
   private handleMessage(data: Buffer): void {
     try {
-      const msg = JSON.parse(data.toString());
+      const raw = data.toString();
+      const msg = JSON.parse(raw);
+
+      if (msg.error || msg.type === "error") {
+        console.error("[gladia-stt] Server error:", raw.slice(0, 500));
+        return;
+      }
 
       if (msg.type === "transcript" && msg.data) {
         // v2 format: msg.data.utterance.text (fallback to msg.data.transcription)
@@ -226,7 +233,9 @@ export class GladiaSttProvider implements SttProvider {
           this.finalizeResolve = null;
         }
       }
-    } catch { /* ignore parse errors */ }
+    } catch (err) {
+      console.error("[gladia-stt] Failed to parse message:", data.toString().slice(0, 200), err);
+    }
   }
 }
 

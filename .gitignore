@@ -104,3 +104,9 @@ clerk-nextjs-guide
 # Git worktrees
 .worktrees/
 .cache/npm/
+.env
+venv
+node_modules
+CLAUDE.md
+clerk-nextjs-guide
+extensions/esp32-voice/.cache

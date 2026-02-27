@@ -93,8 +93,9 @@ export class DeepgramSttProvider implements SttProvider {
         reject(err);
       });
 
-      this.ws.on("close", () => {
-        console.log("[deepgram-stt] Connection closed");
+      this.ws.on("close", (code, reason) => {
+        const reasonStr = reason?.toString() || "";
+        console.log(`[deepgram-stt] Connection closed (code=${code}, reason="${reasonStr}")`);
         this.audioQueue = [];  // discard any buffered frames
         // Resolve finalize if still pending — use partial as fallback
         if (this.finalizeResolve) {
@@ -251,8 +252,8 @@ export class DeepgramSttProvider implements SttProvider {
         console.error("[deepgram-stt] Error:", msg);
       }
       // Ignore "Metadata" and other message types
-    } catch {
-      // Ignore parse errors
+    } catch (err) {
+      console.error("[deepgram-stt] Failed to parse message:", data.toString().slice(0, 200), err);
     }
   }
 }

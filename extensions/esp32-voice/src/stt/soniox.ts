@@ -37,7 +37,7 @@ export class SonioxSttProvider implements SttProvider {
 
   constructor(config: SttProviderConfig) {
     this.apiKey = config.apiKey;
-    this.model = config.model ?? "stt-rt-v4";
+    this.model = config.model ?? "stt-rt-preview";
     this.language = config.language ?? "en";
   }
 
@@ -63,10 +63,10 @@ export class SonioxSttProvider implements SttProvider {
         const config = {
           api_key: this.apiKey,
           model: this.model,
-          audio_format: "pcm_s16le",
+          audio_format: "s16le",
           sample_rate: 16000,
-          num_audio_channels: 1,
-          language: this.language,
+          num_channels: 1,
+          language_hints: [this.language],
         };
         this.ws!.send(JSON.stringify(config));
         this.configSent = true;
@@ -93,8 +93,9 @@ export class SonioxSttProvider implements SttProvider {
         reject(err);
       });
 
-      this.ws.on("close", () => {
-        console.log("[soniox-stt] Connection closed");
+      this.ws.on("close", (code, reason) => {
+        const reasonStr = reason?.toString() || "";
+        console.log(`[soniox-stt] Connection closed (code=${code}, reason="${reasonStr}")`);
         this.audioQueue = [];
         if (this.finalizeResolve) {
           this.finalizeResolve(this.finalTranscript || this.lastPartialTranscript);
@@ -168,34 +169,17 @@ export class SonioxSttProvider implements SttProvider {
 
   private handleMessage(data: Buffer): void {
     try {
-      const msg = JSON.parse(data.toString());
+      const raw = data.toString();
+      const msg = JSON.parse(raw);
 
-      // Soniox sends tokens with text and final flag
-      // Response format: { tokens: [{text, is_final}], ...} or {fw: [...]}
-      if (msg.fw) {
-        // Final words array
-        const text = msg.fw.map((w: any) => w.t).join("").trim();
-        if (text) {
-          this.finalTranscript = this.finalTranscript
-            ? this.finalTranscript + " " + text
-            : text;
-          this.lastPartialTranscript = "";
-          if (this.onTranscript) {
-            const result = this.onTranscript(text, true);
-            if (result instanceof Promise) result.catch(() => {});
-          }
-        }
-      } else if (msg.nfw) {
-        // Non-final (partial) words
-        const text = msg.nfw.map((w: any) => w.t).join("").trim();
-        if (text) {
-          this.lastPartialTranscript = text;
-          if (this.onTranscript) {
-            const result = this.onTranscript(text, false);
-            if (result instanceof Promise) result.catch(() => {});
-          }
-        }
-      } else if (msg.finished !== undefined) {
+      // Check for errors (Soniox uses error_code/error_message)
+      if (msg.error_code || msg.error_message) {
+        console.error("[soniox-stt] Server error:", raw.slice(0, 500));
+        return;
+      }
+
+      // Soniox v4 response: { tokens: [{text, is_final, ...}], finished?: true }
+      if (msg.finished) {
         // Stream finished
         if (this.finalizeResolve) {
           this.finalizeResolve(this.finalTranscript || this.lastPartialTranscript);
@@ -205,8 +189,42 @@ export class SonioxSttProvider implements SttProvider {
           const result = this.onSpeechEnd();
           if (result instanceof Promise) result.catch(() => {});
         }
+        return;
       }
-    } catch { /* ignore parse errors */ }
+
+      if (msg.tokens && Array.isArray(msg.tokens)) {
+        // Separate final and non-final tokens
+        const finalTokens = msg.tokens.filter((t: any) => t.is_final);
+        const nonFinalTokens = msg.tokens.filter((t: any) => !t.is_final);
+
+        if (finalTokens.length > 0) {
+          const text = finalTokens.map((t: any) => t.text).join("").trim();
+          if (text) {
+            this.finalTranscript = this.finalTranscript
+              ? this.finalTranscript + " " + text
+              : text;
+            this.lastPartialTranscript = "";
+            if (this.onTranscript) {
+              const result = this.onTranscript(text, true);
+              if (result instanceof Promise) result.catch(() => {});
+            }
+          }
+        }
+
+        if (nonFinalTokens.length > 0) {
+          const text = nonFinalTokens.map((t: any) => t.text).join("").trim();
+          if (text) {
+            this.lastPartialTranscript = text;
+            if (this.onTranscript) {
+              const result = this.onTranscript(text, false);
+              if (result instanceof Promise) result.catch(() => {});
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.error("[soniox-stt] Failed to parse message:", data.toString().slice(0, 200), err);
+    }
   }
 }
 
@@ -216,7 +234,7 @@ export const sonioxMeta: SttProviderMeta = {
   description: "Ultra-low latency streaming STT with v4 real-time model. Sub-200ms latency at $0.12/hr.",
   streaming: true,
   envVar: "SONIOX_API_KEY",
-  defaultModel: "stt-rt-v4",
+  defaultModel: "stt-rt-preview",
   docsUrl: "https://soniox.com/docs/stt/api-reference/websocket-api",
 };
 

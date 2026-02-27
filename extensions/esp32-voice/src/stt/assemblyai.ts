@@ -29,6 +29,8 @@ export class AssemblyAiSttProvider implements SttProvider {
   private ws: WebSocket | null = null;
   private decoder: any = null;
   private audioQueue: Buffer[] = [];
+  private pcmBuffer: Buffer[] = []; // buffer PCM frames to meet 50ms minimum
+  private pcmBufferSamples = 0;
   private finalTranscript = "";
   private lastPartialTranscript = "";
   private finalizeResolve: ((value: string) => void) | null = null;
@@ -62,6 +64,8 @@ export class AssemblyAiSttProvider implements SttProvider {
       this.finalTranscript = "";
       this.lastPartialTranscript = "";
       this.audioQueue = [];
+      this.pcmBuffer = [];
+      this.pcmBufferSamples = 0;
       this.finalizePromise = new Promise<string>((res) => {
         this.finalizeResolve = res;
       });
@@ -88,8 +92,9 @@ export class AssemblyAiSttProvider implements SttProvider {
         reject(err);
       });
 
-      this.ws.on("close", () => {
-        console.log("[assemblyai-stt] Connection closed");
+      this.ws.on("close", (code, reason) => {
+        const reasonStr = reason?.toString() || "";
+        console.log(`[assemblyai-stt] Connection closed (code=${code}, reason="${reasonStr}")`);
         this.audioQueue = [];
         if (this.finalizeResolve) {
           this.finalizeResolve(this.finalTranscript || this.lastPartialTranscript);
@@ -110,10 +115,20 @@ export class AssemblyAiSttProvider implements SttProvider {
       return;
     }
 
+    // AssemblyAI v3 requires frames ≥ 50ms. ESP32 sends 20ms frames,
+    // so buffer 3 frames (60ms / 960 samples) before sending.
+    this.pcmBuffer.push(pcm);
+    this.pcmBufferSamples += 320; // 320 samples = 20ms at 16kHz
+    if (this.pcmBufferSamples < 960) return; // wait until ≥ 60ms
+
+    const combined = Buffer.concat(this.pcmBuffer);
+    this.pcmBuffer = [];
+    this.pcmBufferSamples = 0;
+
     if (this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(pcm);
+      this.ws.send(combined);
     } else {
-      this.audioQueue.push(pcm);
+      this.audioQueue.push(combined);
     }
   }
 
@@ -123,6 +138,14 @@ export class AssemblyAiSttProvider implements SttProvider {
     }
 
     if (this.finalizePromise) {
+      // Flush any remaining buffered PCM
+      if (this.pcmBuffer.length > 0 && this.ws?.readyState === WebSocket.OPEN) {
+        const remaining = Buffer.concat(this.pcmBuffer);
+        this.ws.send(remaining);
+        this.pcmBuffer = [];
+        this.pcmBufferSamples = 0;
+      }
+
       // Send session termination (v3 format)
       if (this.ws?.readyState === WebSocket.OPEN) {
         this.ws.send(JSON.stringify({ type: "Terminate" }));
@@ -162,7 +185,13 @@ export class AssemblyAiSttProvider implements SttProvider {
 
   private handleMessage(data: Buffer): void {
     try {
-      const msg = JSON.parse(data.toString());
+      const raw = data.toString();
+      const msg = JSON.parse(raw);
+
+      if (msg.error || msg.type === "error") {
+        console.error("[assemblyai-stt] Server error:", raw.slice(0, 500));
+        return;
+      }
 
       // AssemblyAI v3: "Turn" messages with transcript string
       if (msg.type === "Turn") {
@@ -199,7 +228,9 @@ export class AssemblyAiSttProvider implements SttProvider {
           this.finalizeResolve = null;
         }
       }
-    } catch { /* ignore parse errors */ }
+    } catch (err) {
+      console.error("[assemblyai-stt] Failed to parse message:", data.toString().slice(0, 200), err);
+    }
   }
 }
 

@@ -65,8 +65,10 @@ export class ElevenLabsSttProvider implements SttProvider {
           console.log(`[elevenlabs-stt] Connected — flushing ${this.audioQueue.length} buffered chunks`);
           for (const chunk of this.audioQueue) {
             this.ws!.send(JSON.stringify({
-              type: "input_audio_chunk",
-              audio_chunk: chunk,
+              message_type: "input_audio_chunk",
+              audio_base_64: chunk,
+              commit: false,
+              sample_rate: 16000,
             }));
           }
           this.audioQueue = [];
@@ -85,8 +87,9 @@ export class ElevenLabsSttProvider implements SttProvider {
         reject(err);
       });
 
-      this.ws.on("close", () => {
-        console.log("[elevenlabs-stt] Connection closed");
+      this.ws.on("close", (code, reason) => {
+        const reasonStr = reason?.toString() || "";
+        console.log(`[elevenlabs-stt] Connection closed (code=${code}, reason="${reasonStr}")`);
         this.audioQueue = [];
         if (this.finalizeResolve) {
           this.finalizeResolve(this.finalTranscript || this.lastPartialTranscript);
@@ -110,8 +113,10 @@ export class ElevenLabsSttProvider implements SttProvider {
 
     if (this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify({
-        type: "input_audio_chunk",
-        audio_chunk: b64,
+        message_type: "input_audio_chunk",
+        audio_base_64: b64,
+        commit: false,
+        sample_rate: 16000,
       }));
     } else {
       this.audioQueue.push(b64);
@@ -158,9 +163,17 @@ export class ElevenLabsSttProvider implements SttProvider {
 
   private handleMessage(data: Buffer): void {
     try {
-      const msg = JSON.parse(data.toString());
+      const raw = data.toString();
+      const msg = JSON.parse(raw);
 
-      if (msg.type === "partial_transcript") {
+      const msgType = msg.message_type ?? msg.type;
+
+      if (msg.error || msgType === "error" || msgType === "input_error") {
+        console.error("[elevenlabs-stt] Server error:", raw.slice(0, 500));
+        return;
+      }
+
+      if (msgType === "partial_transcript") {
         const text = msg.text?.trim() ?? "";
         if (text) {
           this.lastPartialTranscript = text;
@@ -169,7 +182,7 @@ export class ElevenLabsSttProvider implements SttProvider {
             if (result instanceof Promise) result.catch(() => {});
           }
         }
-      } else if (msg.type === "committed_transcript") {
+      } else if (msgType === "committed_transcript") {
         const text = msg.text?.trim() ?? "";
         if (text) {
           this.finalTranscript = this.finalTranscript
@@ -191,7 +204,9 @@ export class ElevenLabsSttProvider implements SttProvider {
           if (result instanceof Promise) result.catch(() => {});
         }
       }
-    } catch { /* ignore parse errors */ }
+    } catch (err) {
+      console.error("[elevenlabs-stt] Failed to parse message:", data.toString().slice(0, 200), err);
+    }
   }
 }
 
