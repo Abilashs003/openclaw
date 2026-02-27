@@ -554,12 +554,8 @@ export class VoiceSession {
       //   "manual"   → push-to-talk (button held) — VAD must NOT auto-submit
       //   "auto"     → device-side VAD auto-stop — VAD drives submission
       //   "realtime" → continuous realtime mode
-      const rawMode = msg.mode as string | undefined;
-      if (rawMode === "manual" || rawMode === "auto" || rawMode === "realtime") {
-        this.listenMode = rawMode;
-      } else {
-        this.listenMode = "auto"; // safe default
-      }
+      // Always use VAD-driven mode — ignore push-to-talk from device
+      this.listenMode = "auto";
       this.log("info", `Listen start (mode=${this.listenMode})`);
       // If stuck in a non-idle state, force-abort before starting new listen.
       // This recovers from states like streaming_tts or querying_llm that may
@@ -1171,9 +1167,6 @@ export class VoiceSession {
 
     return new Promise<string>((resolve) => {
       let responseContent = "";
-      const timeout = setTimeout(() => {
-        resolve(responseContent || "Request timed out.");
-      }, 120000);
 
       const messageHandler = (data: Buffer) => {
         try {
@@ -1223,6 +1216,11 @@ export class VoiceSession {
           }
         } catch { /* ignore parse errors */ }
       };
+
+      const timeout = setTimeout(() => {
+        this.openclawWs?.off("message", messageHandler);
+        resolve(responseContent || "Request timed out.");
+      }, 120000);
 
       this.openclawWs!.on("message", messageHandler);
     });

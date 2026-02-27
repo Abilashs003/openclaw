@@ -495,8 +495,8 @@ const TTS_PROVIDERS_INFO = [
     hint: "Streaming, raw PCM, 24kHz",
     envVar: "SMALLEST_AI_API_KEY",
     docsUrl: "https://waves-docs.smallest.ai",
-    defaultVoice: "emily",
-    voiceHint: "emily",
+    defaultVoice: "ashley",
+    voiceHint: "ashley",
   },
   {
     value: "groq-playai",
@@ -504,8 +504,8 @@ const TTS_PROVIDERS_INFO = [
     hint: "Batch (cheapest), reuses GROQ_API_KEY",
     envVar: "GROQ_API_KEY",
     docsUrl: "https://console.groq.com/docs/text-to-speech",
-    defaultVoice: "Fritz-PlayAI",
-    voiceHint: "Fritz-PlayAI",
+    defaultVoice: "troy",
+    voiceHint: "troy",
   },
 ] as const;
 

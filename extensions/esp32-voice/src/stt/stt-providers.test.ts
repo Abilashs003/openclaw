@@ -89,7 +89,7 @@ afterEach(() => {
 });
 
 /** Wait a tick for async import("opusscript") and/or fetch to complete */
-const tick = () => new Promise<void>((r) => setTimeout(r, 10));
+const tick = () => new Promise<void>((r) => setTimeout(r, 50));
 
 /** Open a mocked WS — call after provider.connect() starts and after tick() */
 function openWs() {
@@ -144,8 +144,8 @@ describe("SonioxSttProvider", () => {
     provider = new SonioxSttProvider({ apiKey: API_KEY });
   });
 
-  it("defaults: model=stt-rt-v4, language=en", () => {
-    expect((provider as any).model).toBe("stt-rt-v4");
+  it("defaults: model=stt-rt-preview, language=en", () => {
+    expect((provider as any).model).toBe("stt-rt-preview");
     expect((provider as any).language).toBe("en");
   });
 
@@ -171,11 +171,11 @@ describe("SonioxSttProvider", () => {
 
     const configMsg = JSON.parse(MockWs.last!.sent[0] as string);
     expect(configMsg.api_key).toBe(API_KEY);
-    expect(configMsg.model).toBe("stt-rt-v4");
-    expect(configMsg.audio_format).toBe("pcm_s16le");
+    expect(configMsg.model).toBe("stt-rt-preview");
+    expect(configMsg.audio_format).toBe("s16le");
     expect(configMsg.sample_rate).toBe(16000);
-    expect(configMsg.num_audio_channels).toBe(1);
-    expect(configMsg.language).toBe("en");
+    expect(configMsg.num_channels).toBe(1);
+    expect(configMsg.language_hints).toEqual(["en"]);
   });
 
   it("connect() initializes Opus decoder", async () => {
@@ -235,7 +235,7 @@ describe("SonioxSttProvider", () => {
     expect(Buffer.isBuffer(ws.sent[1])).toBe(true); // PCM
   });
 
-  it("handleMessage fw — fires onTranscript(text, true) and accumulates finalTranscript", async () => {
+  it("handleMessage tokens (final) — fires onTranscript(text, true) and accumulates finalTranscript", async () => {
     const c = provider.connect();
     await tick();
     openWs();
@@ -248,7 +248,7 @@ describe("SonioxSttProvider", () => {
 
     const ws = MockWs.last!;
     ws._emit("message", Buffer.from(JSON.stringify({
-      fw: [{ t: "hello " }, { t: "world" }],
+      tokens: [{ text: "hello ", is_final: true }, { text: "world", is_final: true }],
     })));
 
     expect(transcripts).toHaveLength(1);
@@ -257,7 +257,7 @@ describe("SonioxSttProvider", () => {
     expect((provider as any).finalTranscript).toBe("hello world");
   });
 
-  it("handleMessage nfw — fires onTranscript(text, false)", async () => {
+  it("handleMessage tokens (partial) — fires onTranscript(text, false)", async () => {
     const c = provider.connect();
     await tick();
     openWs();
@@ -270,7 +270,7 @@ describe("SonioxSttProvider", () => {
 
     const ws = MockWs.last!;
     ws._emit("message", Buffer.from(JSON.stringify({
-      nfw: [{ t: "hel" }],
+      tokens: [{ text: "hel", is_final: false }],
     })));
 
     expect(transcripts).toHaveLength(1);
@@ -287,7 +287,7 @@ describe("SonioxSttProvider", () => {
 
     // Set some final transcript first
     ws._emit("message", Buffer.from(JSON.stringify({
-      fw: [{ t: "done" }],
+      tokens: [{ text: "done", is_final: true }],
     })));
 
     let speechEndCalled = false;
@@ -310,7 +310,7 @@ describe("SonioxSttProvider", () => {
 
     // Set some transcript
     ws._emit("message", Buffer.from(JSON.stringify({
-      fw: [{ t: "hello" }],
+      tokens: [{ text: "hello", is_final: true }],
     })));
 
     // Start finalize
@@ -337,7 +337,7 @@ describe("SonioxSttProvider", () => {
     // Set partial transcript
     const ws = MockWs.last!;
     ws._emit("message", Buffer.from(JSON.stringify({
-      nfw: [{ t: "partial" }],
+      tokens: [{ text: "partial", is_final: false }],
     })));
 
     vi.useFakeTimers();
@@ -423,10 +423,10 @@ describe("ElevenLabsSttProvider", () => {
     await provider.sendAudio(opusFrame);
 
     const msg = JSON.parse(MockWs.last!.sent[0] as string);
-    expect(msg.type).toBe("input_audio_chunk");
-    expect(typeof msg.audio_chunk).toBe("string");
+    expect(msg.message_type).toBe("input_audio_chunk");
+    expect(typeof msg.audio_base_64).toBe("string");
     // The base64 should decode to 640 bytes (320 samples * 2 bytes each)
-    const decoded = Buffer.from(msg.audio_chunk, "base64");
+    const decoded = Buffer.from(msg.audio_base_64, "base64");
     expect(decoded.length).toBe(640);
   });
 
@@ -449,7 +449,7 @@ describe("ElevenLabsSttProvider", () => {
     // Flushed buffered chunk
     expect(ws.sent.length).toBeGreaterThan(0);
     const msg = JSON.parse(ws.sent[0] as string);
-    expect(msg.type).toBe("input_audio_chunk");
+    expect(msg.message_type).toBe("input_audio_chunk");
   });
 
   it("handleMessage partial_transcript — fires onTranscript(text, false)", async () => {
@@ -609,18 +609,26 @@ describe("AssemblyAiSttProvider", () => {
     await expect(connecting).rejects.toThrow("assemblyai ws error");
   });
 
-  it("sendAudio() decodes Opus and sends PCM binary", async () => {
+  it("sendAudio() decodes Opus and buffers PCM until 60ms (3 frames)", async () => {
     const c = provider.connect();
     await tick();
     openWs();
     await c;
 
+    // AssemblyAI buffers 3 frames (60ms) before sending. Single frame should NOT send.
     await provider.sendAudio(Buffer.from([0x01]));
+    expect(MockWs.last!.sent).toHaveLength(0);
 
-    // sent[0] is the PCM buffer (no config message for AssemblyAI — config is in URL)
+    await provider.sendAudio(Buffer.from([0x02]));
+    expect(MockWs.last!.sent).toHaveLength(0);
+
+    // Third frame triggers send (3 * 320 samples = 960 >= 960)
+    await provider.sendAudio(Buffer.from([0x03]));
+    expect(MockWs.last!.sent).toHaveLength(1);
     const pcmSent = MockWs.last!.sent[0] as Buffer;
     expect(Buffer.isBuffer(pcmSent)).toBe(true);
-    expect(pcmSent.length).toBe(640);
+    // 3 frames * 640 bytes each = 1920 bytes combined
+    expect(pcmSent.length).toBe(1920);
   });
 
   it("sendAudio() buffers before WS open", async () => {
@@ -630,14 +638,17 @@ describe("AssemblyAiSttProvider", () => {
     const ws = MockWs.last!;
     ws.readyState = 0;
 
+    // Send 3 frames to fill PCM buffer while WS is connecting
     await provider.sendAudio(Buffer.from([0x01]));
+    await provider.sendAudio(Buffer.from([0x02]));
+    await provider.sendAudio(Buffer.from([0x03]));
     expect(ws.sent).toHaveLength(0);
 
     ws.readyState = 1;
     ws._emit("open");
     await c;
 
-    // Flushed buffered frame
+    // Flushed 1 combined PCM buffer (3 frames buffered in audioQueue)
     expect(ws.sent.length).toBe(1);
     expect(Buffer.isBuffer(ws.sent[0])).toBe(true);
   });

@@ -120,7 +120,9 @@ export class SonioxSttProvider implements SttProvider {
     if (this.ws.readyState === WebSocket.OPEN && this.configSent) {
       this.ws.send(pcm);
     } else {
-      this.audioQueue.push(pcm);
+      if (this.audioQueue.length < 500) {
+        this.audioQueue.push(pcm);
+      }
     }
   }
 
@@ -137,7 +139,7 @@ export class SonioxSttProvider implements SttProvider {
 
       const TOTAL_TIMEOUT_MS = 6000;
       const timeoutPromise = new Promise<string>((resolve) => {
-        setTimeout(() => {
+        const timer = setTimeout(() => {
           const fallback = this.finalTranscript || this.lastPartialTranscript;
           console.warn(`[soniox-stt] Timeout waiting for final transcript (using: "${fallback}")`);
           if (this.finalizeResolve) {
@@ -146,6 +148,7 @@ export class SonioxSttProvider implements SttProvider {
           }
           resolve(fallback);
         }, TOTAL_TIMEOUT_MS);
+        this.finalizePromise!.then(() => clearTimeout(timer));
       });
 
       return Promise.race([this.finalizePromise, timeoutPromise]);
@@ -165,6 +168,7 @@ export class SonioxSttProvider implements SttProvider {
       } catch { /* ignore */ }
       this.ws = null;
     }
+    this.decoder = null;
   }
 
   private handleMessage(data: Buffer): void {

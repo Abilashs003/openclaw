@@ -112,7 +112,9 @@ export class DeepgramSttProvider implements SttProvider {
       this.ws.send(audioData);
     } else {
       // WS exists but is still connecting — buffer the frame, flush on open
-      this.audioQueue.push(audioData);
+      if (this.audioQueue.length < 500) {
+        this.audioQueue.push(audioData);
+      }
     }
   }
 
@@ -146,7 +148,7 @@ export class DeepgramSttProvider implements SttProvider {
       }, CLOSE_STREAM_DELAY_MS);
 
       const timeoutPromise = new Promise<string>((resolve) => {
-        setTimeout(() => {
+        const timer = setTimeout(() => {
           clearTimeout(closeTimer);
           const fallback = this.finalTranscript || this.lastPartialTranscript;
           console.warn(`[deepgram-stt] Timeout waiting for final transcript (closeStream=${closeStreamSent}, using: "${fallback}")`);
@@ -156,6 +158,8 @@ export class DeepgramSttProvider implements SttProvider {
           }
           resolve(fallback);
         }, TOTAL_TIMEOUT_MS);
+        // Clear timeout if finalizePromise resolves first
+        this.finalizePromise!.then(() => clearTimeout(timer));
       });
 
       return Promise.race([this.finalizePromise, timeoutPromise]).then((result) => {

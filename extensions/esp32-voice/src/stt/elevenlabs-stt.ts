@@ -119,7 +119,9 @@ export class ElevenLabsSttProvider implements SttProvider {
         sample_rate: 16000,
       }));
     } else {
-      this.audioQueue.push(b64);
+      if (this.audioQueue.length < 500) {
+        this.audioQueue.push(b64);
+      }
     }
   }
 
@@ -171,6 +173,7 @@ export class ElevenLabsSttProvider implements SttProvider {
       } catch { /* ignore */ }
       this.ws = null;
     }
+    this.decoder = null;
   }
 
   private handleMessage(data: Buffer): void {

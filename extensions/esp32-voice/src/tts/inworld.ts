@@ -140,15 +140,20 @@ export class InworldTtsProvider implements TtsProvider {
   }
 
   async close(): Promise<void> {
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      try {
-        this.ws.send(JSON.stringify({
-          close_context: {},
-          contextId: this.contextId,
-        }));
-      } catch { /* ignore */ }
-      try { this.ws.close(); } catch { /* ignore */ }
-      this.ws = null;
+    if (this.ws) {
+      if (this.ws.readyState === WebSocket.OPEN) {
+        try {
+          this.ws.send(JSON.stringify({
+            close_context: {},
+            contextId: this.contextId,
+          }));
+        } catch { /* ignore */ }
+        try { this.ws.close(); } catch { /* ignore */ }
+        this.ws = null;
+      } else if (this.ws.readyState === this.ws.CONNECTING) {
+        try { this.ws.terminate(); } catch { /* ignore */ }
+        this.ws = null;
+      }
     }
   }
 
