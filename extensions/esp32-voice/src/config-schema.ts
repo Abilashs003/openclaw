@@ -15,7 +15,13 @@ const Esp32VoiceAccountSchemaBase = z
     allowFrom: z.array(z.string()).optional(),
 
     // STT
-    sttProvider: z.string().optional().default("deepgram"),
+    sttProvider: z.enum([
+      "deepgram",
+      "soniox",
+      "elevenlabs-stt",
+      "assemblyai",
+      "gladia",
+    ]).optional().default("deepgram"),
     sttApiKey: z.string().optional(),
     sttModel: z.string().optional(),
 
