@@ -2,11 +2,10 @@
  * AssemblyAI Universal Streaming Speech-to-Text provider.
  *
  * Uses AssemblyAI's v3 streaming WebSocket API for real-time speech recognition.
- * Requires a two-step connection: first acquire a temporary token via REST,
- * then connect to the WebSocket with that token.
+ * Connects directly with API key in Authorization header (no token needed
+ * for server-side usage).
  *
- * REST: POST https://api.assemblyai.com/v3/streaming/token
- * WS:   wss://streaming.assemblyai.com/v3/ws
+ * WS: wss://streaming.assemblyai.com/v3/ws
  * Docs: https://www.assemblyai.com/docs/api-reference/streaming-api
  */
 
@@ -14,7 +13,6 @@ import WebSocket from "ws";
 import type { SttProvider, SttProviderConfig, SttProviderMeta, SttTranscriptCallback } from "./stt-provider.js";
 import { sttRegistry } from "./stt-registry.js";
 
-const ASSEMBLYAI_TOKEN_URL = "https://api.assemblyai.com/v3/streaming/token";
 const ASSEMBLYAI_WS_URL = "wss://streaming.assemblyai.com/v3/ws";
 
 export class AssemblyAiSttProvider implements SttProvider {
@@ -43,41 +41,23 @@ export class AssemblyAiSttProvider implements SttProvider {
   }
 
   async connect(): Promise<void> {
-    // 1. Initialize Opus decoder
+    // Initialize Opus decoder
     const OpusScript = (await import("opusscript")) as any;
     const Ctor = OpusScript.default ?? OpusScript;
     this.decoder = new Ctor(16000, 1, Ctor.Application.VOIP);
 
-    // 2. Acquire temporary streaming token
-    const tokenRes = await fetch(ASSEMBLYAI_TOKEN_URL, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${this.apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({}),
-    });
-
-    if (!tokenRes.ok) {
-      throw new Error(`[assemblyai-stt] Token request failed: HTTP ${tokenRes.status}`);
-    }
-
-    const tokenData = (await tokenRes.json()) as { token?: string };
-    const token = tokenData.token;
-    if (!token) {
-      throw new Error("[assemblyai-stt] No token in response");
-    }
-
-    // 3. Connect WebSocket with temp token
+    // Connect directly with API key (no token needed for server-side)
     const params = new URLSearchParams({
       sample_rate: "16000",
       encoding: "pcm_s16le",
-      token,
+      format_turns: "true",
     });
     const url = `${ASSEMBLYAI_WS_URL}?${params.toString()}`;
 
     return new Promise<void>((resolve, reject) => {
-      this.ws = new WebSocket(url);
+      this.ws = new WebSocket(url, {
+        headers: { Authorization: this.apiKey },
+      });
 
       this.finalTranscript = "";
       this.lastPartialTranscript = "";
@@ -143,9 +123,9 @@ export class AssemblyAiSttProvider implements SttProvider {
     }
 
     if (this.finalizePromise) {
-      // Send session termination
+      // Send session termination (v3 format)
       if (this.ws?.readyState === WebSocket.OPEN) {
-        this.ws.send(JSON.stringify({ type: "sendSessionTermination" }));
+        this.ws.send(JSON.stringify({ type: "Terminate" }));
       }
 
       const TOTAL_TIMEOUT_MS = 6000;
@@ -184,11 +164,10 @@ export class AssemblyAiSttProvider implements SttProvider {
     try {
       const msg = JSON.parse(data.toString());
 
-      // AssemblyAI v3: receiveTurn with words array
-      if (msg.type === "receiveTurn") {
-        const words = msg.turn?.words ?? [];
-        const text = words.map((w: any) => w.text).join(" ").trim();
-        const isFinal = msg.turn?.end_of_turn ?? false;
+      // AssemblyAI v3: "Turn" messages with transcript string
+      if (msg.type === "Turn") {
+        const text = (msg.transcript ?? "").trim();
+        const isFinal = msg.end_of_turn ?? false;
 
         if (text) {
           if (this.onTranscript) {
@@ -214,7 +193,7 @@ export class AssemblyAiSttProvider implements SttProvider {
             this.lastPartialTranscript = text;
           }
         }
-      } else if (msg.type === "sessionTerminated") {
+      } else if (msg.type === "Termination") {
         if (this.finalizeResolve) {
           this.finalizeResolve(this.finalTranscript || this.lastPartialTranscript);
           this.finalizeResolve = null;

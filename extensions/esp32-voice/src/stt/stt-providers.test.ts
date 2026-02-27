@@ -574,37 +574,26 @@ describe("AssemblyAiSttProvider", () => {
     expect((provider as any).language).toBe("en");
   });
 
-  it("connect() calls fetch for token, then opens WS with token query param", async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ token: "temp-token-abc" }),
-    });
-
+  it("connect() opens WS directly with Authorization header (no token fetch)", async () => {
     const c = provider.connect();
     await tick();
     openWs();
     await c;
 
-    // Verify fetch was called correctly
-    expect(mockFetch).toHaveBeenCalledOnce();
-    const [fetchUrl, fetchOpts] = mockFetch.mock.calls[0];
-    expect(fetchUrl).toBe("https://api.assemblyai.com/v3/streaming/token");
-    expect(fetchOpts.method).toBe("POST");
-    expect(fetchOpts.headers.Authorization).toBe(`Bearer ${API_KEY}`);
+    // No fetch call — direct WS connection
+    expect(mockFetch).not.toHaveBeenCalled();
 
-    // Verify WS URL contains token
+    // Verify WS URL
     expect(MockWs.last!.url).toContain("wss://streaming.assemblyai.com/v3/ws");
-    expect(MockWs.last!.url).toContain("token=temp-token-abc");
     expect(MockWs.last!.url).toContain("sample_rate=16000");
     expect(MockWs.last!.url).toContain("encoding=pcm_s16le");
+    expect(MockWs.last!.url).toContain("format_turns=true");
+
+    // Verify auth header
+    expect((MockWs.last!.options as any).headers.Authorization).toBe(API_KEY);
   });
 
   it("connect() initializes Opus decoder", async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ token: "tok" }),
-    });
-
     const c = provider.connect();
     await tick();
     openWs();
@@ -613,30 +602,7 @@ describe("AssemblyAiSttProvider", () => {
     expect((provider as any).decoder).toBeInstanceOf(MockOpusScript);
   });
 
-  it("connect() rejects if token fetch fails (non-ok response)", async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: false,
-      status: 401,
-    });
-
-    await expect(provider.connect()).rejects.toThrow("Token request failed: HTTP 401");
-  });
-
-  it("connect() rejects if no token in response", async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({}),
-    });
-
-    await expect(provider.connect()).rejects.toThrow("No token in response");
-  });
-
   it("connect() rejects on WS error", async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ token: "tok" }),
-    });
-
     const connecting = provider.connect();
     await tick();
     MockWs.last!._emit("error", new Error("assemblyai ws error"));
@@ -644,11 +610,6 @@ describe("AssemblyAiSttProvider", () => {
   });
 
   it("sendAudio() decodes Opus and sends PCM binary", async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ token: "tok" }),
-    });
-
     const c = provider.connect();
     await tick();
     openWs();
@@ -663,11 +624,6 @@ describe("AssemblyAiSttProvider", () => {
   });
 
   it("sendAudio() buffers before WS open", async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ token: "tok" }),
-    });
-
     const c = provider.connect();
     await tick();
 
@@ -686,12 +642,7 @@ describe("AssemblyAiSttProvider", () => {
     expect(Buffer.isBuffer(ws.sent[0])).toBe(true);
   });
 
-  it("handleMessage receiveTurn with end_of_turn: false — partial transcript", async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ token: "tok" }),
-    });
-
+  it("handleMessage Turn with end_of_turn: false — partial transcript", async () => {
     const c = provider.connect();
     await tick();
     openWs();
@@ -704,11 +655,9 @@ describe("AssemblyAiSttProvider", () => {
 
     const ws = MockWs.last!;
     ws._emit("message", Buffer.from(JSON.stringify({
-      type: "receiveTurn",
-      turn: {
-        words: [{ text: "hello" }, { text: "world" }],
-        end_of_turn: false,
-      },
+      type: "Turn",
+      transcript: "hello world",
+      end_of_turn: false,
     })));
 
     expect(transcripts).toHaveLength(1);
@@ -716,12 +665,7 @@ describe("AssemblyAiSttProvider", () => {
     expect(transcripts[0].isFinal).toBe(false);
   });
 
-  it("handleMessage receiveTurn with end_of_turn: true — final transcript, resolves finalize, fires onSpeechEnd", async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ token: "tok" }),
-    });
-
+  it("handleMessage Turn with end_of_turn: true — final transcript, resolves finalize, fires onSpeechEnd", async () => {
     const c = provider.connect();
     await tick();
     openWs();
@@ -737,11 +681,9 @@ describe("AssemblyAiSttProvider", () => {
 
     const ws = MockWs.last!;
     ws._emit("message", Buffer.from(JSON.stringify({
-      type: "receiveTurn",
-      turn: {
-        words: [{ text: "hello" }, { text: "world" }],
-        end_of_turn: true,
-      },
+      type: "Turn",
+      transcript: "hello world",
+      end_of_turn: true,
     })));
 
     expect(transcripts).toHaveLength(1);
@@ -750,12 +692,7 @@ describe("AssemblyAiSttProvider", () => {
     expect((provider as any).finalTranscript).toBe("hello world");
   });
 
-  it("handleMessage sessionTerminated — resolves finalize", async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ token: "tok" }),
-    });
-
+  it("handleMessage Termination — resolves finalize", async () => {
     const c = provider.connect();
     await tick();
     openWs();
@@ -766,21 +703,16 @@ describe("AssemblyAiSttProvider", () => {
     // Start finalize — this sets up the race
     const finalizePromise = provider.finalize();
 
-    // Send sessionTerminated
+    // Send Termination
     ws._emit("message", Buffer.from(JSON.stringify({
-      type: "sessionTerminated",
+      type: "Termination",
     })));
 
     const result = await finalizePromise;
     expect(result).toBe("");
   });
 
-  it("finalize() sends { type: 'sendSessionTermination' }", async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ token: "tok" }),
-    });
-
+  it("finalize() sends { type: 'Terminate' }", async () => {
     const c = provider.connect();
     await tick();
     openWs();
@@ -791,19 +723,14 @@ describe("AssemblyAiSttProvider", () => {
 
     // Check that session termination was sent
     const termMsg = JSON.parse(ws.sent[0] as string);
-    expect(termMsg.type).toBe("sendSessionTermination");
+    expect(termMsg.type).toBe("Terminate");
 
-    // Resolve via sessionTerminated message
-    ws._emit("message", Buffer.from(JSON.stringify({ type: "sessionTerminated" })));
+    // Resolve via Termination message
+    ws._emit("message", Buffer.from(JSON.stringify({ type: "Termination" })));
     await finalizePromise;
   });
 
   it("finalize() timeout fallback (6s)", async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ token: "tok" }),
-    });
-
     const c = provider.connect();
     await tick();
     openWs();
@@ -812,11 +739,9 @@ describe("AssemblyAiSttProvider", () => {
     // Set partial transcript
     const ws = MockWs.last!;
     ws._emit("message", Buffer.from(JSON.stringify({
-      type: "receiveTurn",
-      turn: {
-        words: [{ text: "partial" }],
-        end_of_turn: false,
-      },
+      type: "Turn",
+      transcript: "partial",
+      end_of_turn: false,
     })));
 
     vi.useFakeTimers();
@@ -829,11 +754,6 @@ describe("AssemblyAiSttProvider", () => {
   });
 
   it("close() handles CONNECTING state (terminate)", async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ token: "tok" }),
-    });
-
     const c = provider.connect();
     await tick();
     const ws = MockWs.last!;
@@ -843,11 +763,6 @@ describe("AssemblyAiSttProvider", () => {
   });
 
   it("close() handles OPEN state (close)", async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ token: "tok" }),
-    });
-
     const c = provider.connect();
     await tick();
     openWs();
@@ -866,12 +781,12 @@ describe("GladiaSttProvider", () => {
     provider = new GladiaSttProvider({ apiKey: API_KEY });
   });
 
-  it("defaults: model=solaria, language=en", () => {
-    expect((provider as any).model).toBe("solaria");
+  it("defaults: model=solaria-1, language=en", () => {
+    expect((provider as any).model).toBe("solaria-1");
     expect((provider as any).language).toBe("en");
   });
 
-  it("connect() calls fetch for init, then opens WS to returned URL", async () => {
+  it("connect() calls fetch for init with wav/pcm encoding, then opens WS to returned URL", async () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: async () => ({ url: "wss://gladia.io/session/abc123" }),
@@ -891,20 +806,36 @@ describe("GladiaSttProvider", () => {
     expect(fetchOpts.headers["Content-Type"]).toBe("application/json");
 
     const body = JSON.parse(fetchOpts.body);
-    expect(body.encoding).toBe("opus");
+    expect(body.encoding).toBe("wav/pcm");
+    expect(body.bit_depth).toBe(16);
     expect(body.sample_rate).toBe(16000);
     expect(body.channels).toBe(1);
-    expect(body.model).toBe("solaria");
-    expect(body.language).toBe("en");
+    expect(body.model).toBe("solaria-1");
+    expect(body.language_config).toEqual({ languages: ["en"], code_switching: false });
 
     // Verify WS URL is the one from init response
     expect(MockWs.last!.url).toBe("wss://gladia.io/session/abc123");
+  });
+
+  it("connect() initializes Opus decoder (v2 requires wav/pcm)", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ url: "wss://gladia.io/session/abc" }),
+    });
+
+    const c = provider.connect();
+    await tick();
+    openWs();
+    await c;
+
+    expect((provider as any).decoder).toBeInstanceOf(MockOpusScript);
   });
 
   it("connect() rejects if init fetch fails", async () => {
     mockFetch.mockResolvedValueOnce({
       ok: false,
       status: 403,
+      text: async () => "Forbidden",
     });
 
     await expect(provider.connect()).rejects.toThrow("Session init failed: HTTP 403");
@@ -931,7 +862,7 @@ describe("GladiaSttProvider", () => {
     await expect(connecting).rejects.toThrow("gladia ws error");
   });
 
-  it("sendAudio() sends raw Opus (no decode!) — verify NO decoder", async () => {
+  it("sendAudio() decodes Opus to PCM and sends binary (v2 requires wav/pcm)", async () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: async () => ({ url: "wss://gladia.io/session/abc" }),
@@ -942,16 +873,16 @@ describe("GladiaSttProvider", () => {
     openWs();
     await c;
 
-    // Gladia should NOT have a decoder (no opusscript import)
-    expect((provider as any).decoder).toBeUndefined();
+    // Gladia v2 should have a decoder (decodes Opus→PCM)
+    expect((provider as any).decoder).toBeInstanceOf(MockOpusScript);
 
     const opusFrame = Buffer.from([0x01, 0x02, 0x03]);
     await provider.sendAudio(opusFrame);
 
-    // sent[0] should be the raw buffer, not decoded
+    // sent[0] should be decoded PCM (640 bytes = 320 samples * 2)
     const sent = MockWs.last!.sent[0] as Buffer;
     expect(Buffer.isBuffer(sent)).toBe(true);
-    expect(sent).toEqual(opusFrame);
+    expect(sent.length).toBe(640);
   });
 
   it("sendAudio() buffers before WS open", async () => {
@@ -965,17 +896,17 @@ describe("GladiaSttProvider", () => {
     const ws = MockWs.last!;
     ws.readyState = 0;
 
-    const frame = Buffer.from([0x01, 0x02]);
-    await provider.sendAudio(frame);
+    await provider.sendAudio(Buffer.from([0x01, 0x02]));
     expect(ws.sent).toHaveLength(0);
 
     ws.readyState = 1;
     ws._emit("open");
     await c;
 
-    // Flushed buffered frame
+    // Flushed buffered frame (decoded PCM)
     expect(ws.sent.length).toBe(1);
-    expect(ws.sent[0]).toEqual(frame);
+    expect(Buffer.isBuffer(ws.sent[0])).toBe(true);
+    expect((ws.sent[0] as Buffer).length).toBe(640);
   });
 
   it("handleMessage transcript with is_final: false — partial", async () => {

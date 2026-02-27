@@ -1,12 +1,12 @@
 /**
  * Gladia Solaria streaming Speech-to-Text provider.
  *
- * Uses Gladia's live transcription API for real-time speech recognition.
+ * Uses Gladia's v2 live transcription API for real-time speech recognition.
  * Two-step connection: POST to init session → connect to returned WS URL.
- * Accepts Opus audio natively — no conversion needed.
+ * Gladia v2 requires wav/pcm encoding — Opus frames are decoded internally.
  *
  * REST: POST https://api.gladia.io/v2/live
- * Docs: https://docs.gladia.io/chapters/speech-to-text-api/pages/live-speech-recognition
+ * Docs: https://docs.gladia.io/api-reference/v2/live/websocket
  */
 
 import WebSocket from "ws";
@@ -27,6 +27,7 @@ export class GladiaSttProvider implements SttProvider {
   private model: string;
   private language: string;
   private ws: WebSocket | null = null;
+  private decoder: any = null;
   private audioQueue: Buffer[] = [];
   private finalTranscript = "";
   private lastPartialTranscript = "";
@@ -35,11 +36,16 @@ export class GladiaSttProvider implements SttProvider {
 
   constructor(config: SttProviderConfig) {
     this.apiKey = config.apiKey;
-    this.model = config.model ?? "solaria";
+    this.model = config.model ?? "solaria-1";
     this.language = config.language ?? "en";
   }
 
   async connect(): Promise<void> {
+    // Initialize Opus decoder (Gladia v2 requires wav/pcm, not Opus)
+    const OpusScript = (await import("opusscript")) as any;
+    const Ctor = OpusScript.default ?? OpusScript;
+    this.decoder = new Ctor(16000, 1, Ctor.Application.VOIP);
+
     // 1. Init session via REST
     const initRes = await fetch(GLADIA_INIT_URL, {
       method: "POST",
@@ -48,16 +54,21 @@ export class GladiaSttProvider implements SttProvider {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        encoding: "opus",
+        encoding: "wav/pcm",
+        bit_depth: 16,
         sample_rate: 16000,
         channels: 1,
         model: this.model,
-        language: this.language,
+        language_config: {
+          languages: [this.language],
+          code_switching: false,
+        },
       }),
     });
 
     if (!initRes.ok) {
-      throw new Error(`[gladia-stt] Session init failed: HTTP ${initRes.status}`);
+      const body = await initRes.text().catch(() => "");
+      throw new Error(`[gladia-stt] Session init failed: HTTP ${initRes.status} ${body}`);
     }
 
     const initData = (await initRes.json()) as { url?: string };
@@ -113,11 +124,19 @@ export class GladiaSttProvider implements SttProvider {
   async sendAudio(audioData: Buffer): Promise<void> {
     if (this.ws === null) return;
 
-    // Gladia accepts Opus natively — send raw frames
+    // Decode Opus → PCM16 (Gladia v2 requires wav/pcm, not Opus)
+    let pcm: Buffer;
+    try {
+      const decoded = this.decoder.decode(audioData, 320);
+      pcm = Buffer.from(decoded);
+    } catch {
+      return; // Skip malformed Opus frames
+    }
+
     if (this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(audioData);
+      this.ws.send(pcm);
     } else {
-      this.audioQueue.push(audioData);
+      this.audioQueue.push(pcm);
     }
   }
 
@@ -169,7 +188,8 @@ export class GladiaSttProvider implements SttProvider {
       const msg = JSON.parse(data.toString());
 
       if (msg.type === "transcript" && msg.data) {
-        const text = msg.data.transcription?.trim() ?? "";
+        // v2 format: msg.data.utterance.text (fallback to msg.data.transcription)
+        const text = (msg.data.utterance?.text ?? msg.data.transcription ?? "").trim();
         const isFinal = msg.data.is_final ?? false;
 
         if (text) {
@@ -213,11 +233,11 @@ export class GladiaSttProvider implements SttProvider {
 export const gladiaMeta: SttProviderMeta = {
   id: "gladia",
   name: "Gladia",
-  description: "Real-time streaming STT with native Opus support. 270ms latency, 100+ languages.",
+  description: "Real-time streaming STT with Solaria model. 270ms latency, 100+ languages.",
   streaming: true,
   envVar: "GLADIA_API_KEY",
-  defaultModel: "solaria",
-  docsUrl: "https://docs.gladia.io/chapters/speech-to-text-api/pages/live-speech-recognition",
+  defaultModel: "solaria-1",
+  docsUrl: "https://docs.gladia.io/api-reference/v2/live/websocket",
 };
 
 function createGladiaStt(config: SttProviderConfig): SttProvider {
