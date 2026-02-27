@@ -21,7 +21,7 @@ import { ttsRegistry } from "./tts-registry.js";
 
 const RIME_WS_URL = "wss://users-ws.rime.ai/ws";
 
-const DEFAULT_VOICE_ID = "cove";
+const DEFAULT_VOICE_ID = "luna";
 const DEFAULT_MODEL_ID = "mistv2";
 
 export class RimeTtsProvider implements TtsProvider {
@@ -49,7 +49,7 @@ export class RimeTtsProvider implements TtsProvider {
   }
 
   async connect(): Promise<void> {
-    const url = `${RIME_WS_URL}?speaker=${this.voiceId}&modelId=${this.modelId}&audioFormat=pcm`;
+    const url = `${RIME_WS_URL}?speaker=${this.voiceId}&modelId=${this.modelId}&audioFormat=pcm&samplingRate=24000`;
 
     return new Promise<void>((resolve, reject) => {
       this.ws = new WebSocket(url, {
